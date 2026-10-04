@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>视频任务 · NoteToFilm</title><script src="/static/theme.js"></script><link rel="stylesheet" href="/static/style.css"><script src="/static/common.js" defer></script><script src="/static/review.js" defer></script></head>
+<body>
+<header class="topbar"><div class="topbar-inner">
+  <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">▶</span>NoteToFilm <span class="brand-sub">出口成片</span></a>
+  <nav aria-label="站点导航"><a href="/">返回工作台</a><button class="ghost theme-toggle" data-action="theme" type="button" aria-label="切换深色模式">◐</button></nav>
+</div></header>
+<main class="main" id="review">
+  <div class="page-header"><div><div id="task-ref" class="eyebrow">VIDEO WORKSPACE</div><h1 id="task-title">正在读取任务</h1><p class="muted" id="boundary"></p></div><span id="status" class="badge">读取中</span></div>
+  <ol class="steps" aria-label="任务阶段"><li data-stage="planned"><span>01</span>确认分镜</li><li data-stage="review"><span>02</span>复核图音</li><li data-stage="done"><span>03</span>合成下载</li></ol>
+  <section id="task-toolbar" class="task-toolbar" aria-label="当前任务操作" hidden>
+    <div><p id="counts" class="task-counts"></p><p id="next-step" class="fine muted"></p></div>
+    <div class="actions"><button id="generate" class="primary" hidden>确认分镜，生成图音</button><button id="compose" class="primary" hidden>合成视频</button><button id="retry" class="primary" hidden>尝试恢复</button><button id="archive" class="ghost" hidden>归档任务</button></div>
+  </section>
+  <div id="notice" class="notice" role="status" aria-live="polite"></div>
+  <section id="finished" class="card finished" aria-labelledby="finished-title" hidden>
+    <div class="panel-title"><div><h2 id="finished-title">你的成片</h2><p class="muted fine">播放检查画面与旁白，满意后下载保存。</p></div><a id="download" class="button primary" download>下载 MP4 ↓</a></div>
+    <video id="video" controls playsinline preload="metadata" aria-label="成片播放器"></video>
+    <p class="fine muted">请及时下载。当前部署若使用临时存储，重启或重建可能清除成片。</p>
+  </section>
+  <details class="card source-card"><summary>原始文稿 · 核对完整性</summary><p id="source" class="details"></p></details>
+  <section id="plan-editor" class="card" hidden>
+    <div class="panel-title"><h2>分镜旁白</h2><span id="save-state" class="badge" role="status">已保存</span></div>
+    <p class="muted fine">核对每一镜的内容。修改后先保存，再确认生成图片与配音。</p>
+    <div id="plan-inputs"></div>
+    <div class="actions"><button id="add-scene">＋ 增加一镜</button><button id="save-plan" class="primary">保存修改</button></div>
+  </section>
+  <section id="materials" aria-labelledby="materials-title" hidden><div class="section-title"><h2 id="materials-title">逐镜复核</h2><p class="fine muted" id="materials-note"></p></div><div id="scenes" class="scenes"></div></section>
+  <details id="request-details" class="request-details" hidden><summary>生成请求记录</summary><p id="request-count" class="fine muted"></p></details>
+</main>
+</body></html>

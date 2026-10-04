@@ -1,0 +1,181 @@
+import time
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import APIKeyCookie, APIKeyHeader
+
+from .auth import SESSION_SECONDS, VISITOR_SECONDS, signed_session
+from .schemas import (Accepted, ConfigEdit, ConfigRestore, Confirm, ErrorResponse, Gate, Generate,
+                      Health, Login, ModelSettings, Ok, Plan, SessionInfo, Submit, TaskDetail, TaskList)
+
+admin_header = APIKeyHeader(name='X-Access-Token', scheme_name='AdminToken', auto_error=False)
+admin_cookie = APIKeyCookie(name='ntf_admin', scheme_name='AdminCookie', auto_error=False)
+visitor_cookie = APIKeyCookie(name='ntf_visitor', scheme_name='VisitorCookie', auto_error=False)
+
+
+def visitor_access(request: Request, cookie: Annotated[str | None, Depends(visitor_cookie)],
+                   header: Annotated[str | None, Depends(admin_header)],
+                   admin: Annotated[str | None, Depends(admin_cookie)]):
+    return request.state.owner
+
+
+def administrator(request: Request, header: Annotated[str | None, Depends(admin_header)],
+                  cookie: Annotated[str | None, Depends(admin_cookie)]):
+    if not request.state.admin:
+        raise HTTPException(401, '请先以管理员身份登录')
+
+
+def owned(request, tid):
+    tasks = request.app.state.tasks
+    tasks.authorize(tid, request.state.owner, request.state.admin)
+    return tasks
+
+
+def accepted(tid, result=None):
+    result = result or {}
+    confirmation = bool(result.get('needs_confirm'))
+    return Accepted(task_id=tid, status_url=f'/api/v1/tasks/{tid}', accepted=not confirmation,
+                    needs_confirm=confirmation, message=result.get('message'))
+
+
+def create_router():
+    router = APIRouter(responses={code: {'model': ErrorResponse} for code in (400, 401, 403, 404, 409, 413, 422, 429, 500, 503, 507)})
+    tasks = APIRouter(prefix='/tasks', tags=['Tasks'], dependencies=[Depends(visitor_access)])
+    admin = APIRouter(prefix='/admin/config', tags=['Admin configuration'], dependencies=[Depends(administrator)])
+
+    @router.get('/health', tags=['System'], response_model=Health)
+    def health():
+        return Health()
+
+    @router.get('/session', tags=['Session'], response_model=SessionInfo)
+    def session(request: Request):
+        c = request.app.state.config
+        return SessionInfo(admin=request.state.admin, ephemeral=bool(c.space_host), visitor_expires_in=VISITOR_SECONDS,
+                           limits={'script_chars': c.max_script, 'scenes': c.max_scenes, 'daily_tasks': c.max_daily_tasks,
+                                   'visitor_daily_tasks': c.max_visitor_tasks, 'daily_images': c.max_daily_images})
+
+    @router.post('/auth/login', tags=['Session'], response_model=Ok)
+    def login(body: Login, request: Request):
+        import hmac
+        settings = request.app.state.config
+        with request.app.state.login_lock:
+            failures = request.app.state.login_failures
+            cutoff = time.monotonic() - 60
+            failures[:] = [t for t in failures if t > cutoff]
+            if len(failures) >= 10:
+                raise HTTPException(429, '登录尝试过多，请一分钟后再试')
+            if not settings.token or not hmac.compare_digest(body.token.encode(), settings.token.encode()):
+                failures.append(time.monotonic())
+                raise HTTPException(401, '管理员令牌错误')
+        response = JSONResponse({'ok': True})
+        response.set_cookie('ntf_admin', signed_session(settings.token, int(time.time()) + SESSION_SECONDS),
+                            max_age=SESSION_SECONDS, httponly=True, secure=settings.cookie_secure, samesite='strict')
+        return response
+
+    @router.post('/auth/logout', tags=['Session'], response_model=Ok)
+    def logout():
+        response = JSONResponse({'ok': True})
+        response.delete_cookie('ntf_admin')
+        return response
+
+    @tasks.get('', response_model=TaskList)
+    def listing(request: Request):
+        return request.app.state.tasks.listing(None if request.state.admin else request.state.owner)
+
+    @tasks.post('', status_code=202, response_model=Accepted)
+    def submit(body: Submit, request: Request, response: Response):
+        result = request.app.state.tasks.submit(body.script, request.state.owner)
+        response.headers['Location'] = f'/api/v1/tasks/{result["task_id"]}'
+        return accepted(result['task_id'])
+
+    @tasks.get('/{tid}', response_model=TaskDetail)
+    def detail(tid: int, request: Request):
+        return owned(request, tid).detail(tid)
+
+    @tasks.post('/{tid}/generate', status_code=202, response_model=Accepted)
+    def generate(tid: int, body: Generate, request: Request):
+        return accepted(tid, owned(request, tid).generate(tid, body.confirmed, body.revision))
+
+    @tasks.put('/{tid}/plan', response_model=Ok)
+    def save_plan(tid: int, body: Plan, request: Request):
+        try:
+            return owned(request, tid).save_plan(tid, body.scenes, body.revision)
+        except ValueError:
+            raise HTTPException(422, '分镜数量或旁白长度超过限制，未保存') from None
+
+    @tasks.post('/{tid}/archive', response_model=Ok)
+    def archive(tid: int, request: Request):
+        return owned(request, tid).archive(tid)
+
+    @tasks.put('/{tid}/scenes/{idx}/gate', response_model=Ok)
+    def gate(tid: int, idx: int, body: Gate, request: Request):
+        return owned(request, tid).gate(tid, idx, body.gate, body.passed, body.revision)
+
+    @tasks.post('/{tid}/scenes/{idx}/regen-image', status_code=202, response_model=Accepted)
+    def regen_image(tid: int, idx: int, body: Confirm, request: Request):
+        return accepted(tid, owned(request, tid).regen(tid, idx, 'img', body.confirmed))
+
+    @tasks.post('/{tid}/scenes/{idx}/regen-audio', status_code=202, response_model=Accepted)
+    def regen_audio(tid: int, idx: int, request: Request):
+        return accepted(tid, owned(request, tid).regen(tid, idx, 'aud', True))
+
+    @tasks.post('/{tid}/retry', status_code=202, response_model=Accepted, responses={200: {'model': Accepted}})
+    def retry(tid: int, body: Confirm, request: Request, response: Response):
+        result = owned(request, tid).retry(tid, body.confirmed)
+        if result.get('needs_confirm'):
+            response.status_code = 200
+        return accepted(tid, result)
+
+    @tasks.post('/{tid}/render', status_code=202, response_model=Accepted)
+    def render(tid: int, request: Request):
+        return accepted(tid, owned(request, tid).render(tid))
+
+    @tasks.get('/{tid}/download', response_class=FileResponse, responses={200: {'content': {'video/mp4': {}}}})
+    def download(tid: int, request: Request):
+        service = owned(request, tid)
+        with service.store.connect() as conn:
+            task = service.task(conn, tid)
+        if task['status'] != 'done' or not task['video_path']:
+            raise HTTPException(404, '成片尚不可下载')
+        return FileResponse(service.allowed_file(tid, task['video_path']), media_type='video/mp4',
+                            filename=f'notetofilm-{tid}.mp4', content_disposition_type='attachment')
+
+    @tasks.get('/{tid}/files/{name:path}', response_class=FileResponse, responses={200: {'content': {'application/octet-stream': {}}}})
+    def files(tid: int, name: str, request: Request):
+        return FileResponse(owned(request, tid).allowed_file(tid, name))
+
+    @admin.get('', response_model=ModelSettings)
+    def config(request: Request):
+        return request.app.state.tasks.models.info()
+
+    @admin.post('/validate', response_model=Ok)
+    def validate_config(body: ConfigEdit, request: Request):
+        try:
+            request.app.state.tasks.models.validate(body.text)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        return {'ok': True, 'message': '语法和参数校验通过；未调用模型，尚未保存'}
+
+    @admin.put('', response_model=ModelSettings)
+    def save_config(body: ConfigEdit, request: Request):
+        try:
+            return request.app.state.tasks.models.save(body.text, body.revision, body.confirm_binding)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @admin.post('/restore', response_model=ModelSettings)
+    def restore_config(body: ConfigRestore, request: Request):
+        try:
+            return request.app.state.tasks.models.restore(body.revision, body.confirm_binding)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @admin.get('/export', response_class=Response, responses={200: {'content': {'application/toml': {}}}})
+    def export_config(request: Request):
+        text = request.app.state.tasks.models.info()['text']
+        return Response(text, media_type='application/toml', headers={'Content-Disposition': 'attachment; filename="config.toml"'})
+
+    router.include_router(tasks)
+    router.include_router(admin)
+    return router

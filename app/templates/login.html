@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>管理员登录 · NoteToFilm</title><script src="/static/theme.js"></script><link rel="stylesheet" href="/static/style.css"><script src="/static/common.js" defer></script><script src="/static/login.js" defer></script></head>
+<body>
+<main class="login">
+  <section class="card">
+    <div class="brand-mark" aria-hidden="true">▶</div>
+    <h1>管理员登录</h1>
+    <p class="muted">仅修改模型配置需要登录。令牌不会写入网址。</p>
+    <form id="login-form">
+      <label for="token">管理员令牌</label>
+      <input id="token" type="password" autocomplete="current-password" required autofocus>
+      <div class="actions"><button type="submit" id="login" class="primary">进入设置</button><button class="ghost theme-toggle" data-action="theme" type="button" aria-label="切换深色模式" title="切换深色模式">◐</button><a class="button ghost" href="/">返回工作台</a></div>
+    </form>
+    <div id="notice" class="notice" role="status" aria-live="polite"></div>
+  </section>
+</main>
+</body></html>

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>模型设置 · NoteToFilm</title><script src="/static/theme.js"></script><link rel="stylesheet" href="/static/style.css"><script src="/static/common.js" defer></script><script src="/static/admin.js" defer></script></head>
+<body>
+<header class="topbar"><div class="topbar-inner">
+  <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">▶</span>NoteToFilm <span class="brand-sub">模型设置</span></a>
+  <nav aria-label="管理操作"><button class="ghost theme-toggle" data-action="theme" type="button" aria-label="切换深色模式" title="切换深色模式">◐</button><button id="logout" class="ghost" type="button">退出管理员</button></nav>
+</div></header>
+<main class="main">
+  <div class="page-header"><div>
+    <div class="eyebrow">ADMIN SETTINGS</div>
+    <h1>模型设置</h1>
+    <p class="muted">普通访客无需登录。只有管理员可以查看和修改此配置。</p>
+  </div></div>
+  <section class="card">
+    <div class="panel-title"><h2>config.toml</h2><span id="version" class="badge">读取中</span></div>
+    <p class="muted fine" id="storage"></p>
+    <p class="muted fine" id="secrets"></p>
+    <label for="config">模型与配音配置</label>
+    <textarea id="config" class="config-editor" rows="19" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+    <p class="muted fine">只保存网关地址、模型和密钥引用。API key 仍由 HF Secrets / 环境变量提供，不会显示或写入此文件。保存只影响新任务，旧任务保留原配置；密钥轮换需要重启。</p>
+    <label class="checkline"><input id="confirm-binding" type="checkbox">如网关或密钥引用发生变化，我确认该网关有权接收所选密钥和文稿。</label>
+    <div class="actions"><button id="validate">校验</button><button id="save" class="primary">保存并应用</button><button id="reload">重新加载</button><button id="restore">恢复上一版</button><button id="export">导出 TOML</button></div>
+    <div id="notice" class="notice" role="status" aria-live="polite"></div>
+  </section>
+  <p class="muted fine">校验、保存和恢复不会调用模型，不产生推理费用。修改音色或模型名称不会验证上游是否支持，实际生成仍需单独确认。</p>
+</main></body></html>

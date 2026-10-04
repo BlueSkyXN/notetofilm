@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>API 文档 · NoteToFilm</title><script src="/static/theme.js"></script><link rel="stylesheet" href="/static/style.css"><script src="/static/api-docs.js" defer></script></head>
+<body>
+<header class="topbar"><div class="topbar-inner"><a class="brand" href="/"><span class="brand-mark" aria-hidden="true">▶</span>NoteToFilm <span class="brand-sub">API 文档</span></a><nav aria-label="站点导航"><a href="/">返回工作台</a><button class="ghost theme-toggle" data-action="theme" type="button" aria-label="切换深色模式">◐</button></nav></div></header>
+<main class="main docs-main">
+  <div class="page-header"><div><div class="eyebrow">DEVELOPER REFERENCE</div><h1>NoteToFilm API v1</h1><p class="muted">前端与第三方客户端使用同一套 API。</p></div><a class="button" href="/api/v1/openapi.json" download="openapi.json">下载 OpenAPI</a></div>
+  <section class="card"><h2>开始接入</h2><p>先请求 <code>GET /api/v1/session</code> 并保存访客 Cookie。管理员通过登录接口或 <code>X-Access-Token</code> 访问配置；不要将令牌放进 URL。</p><p class="muted">异步任务返回 202 与 status_url，轮询查看结果。本页只展示接口定义，不执行生成请求。</p></section>
+  <div id="notice" class="notice" role="status">正在加载接口规范…</div><section id="endpoints" aria-label="接口列表"></section>
+</main></body></html>
