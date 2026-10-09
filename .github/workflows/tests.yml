@@ -1,0 +1,40 @@
+name: Application regression
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: regression-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  offline-regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - name: Install runtime and media dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          python -m pip install -r requirements.txt
+      - name: Record runtime versions
+        run: |
+          python --version
+          python -m pip freeze
+          ffmpeg -version
+          ffprobe -version
+      - name: Strict offline unit, HTTP and FFmpeg regression
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          NO_PROXY: 127.0.0.1,localhost
+        run: python -B scripts/check_tests.py
+      - name: Check frontend syntax
+        run: |
+          for file in app/static/*.js; do node --check "$file"; done
+          git diff --check
+      - name: Build production image with strict regression
+        run: docker build --tag notetofilm:regression .
