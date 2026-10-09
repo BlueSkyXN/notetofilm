@@ -16,12 +16,13 @@ from starlette.exceptions import HTTPException
 
 from .api import create_router
 from .auth import VISITOR_SECONDS, new_visitor, signed_session, valid_session, visitor_owner
+from .body_limit import BodyLimitMiddleware
 from .config import Config, ROOT
 from .tasks import Tasks
 
 LOG = logging.getLogger('notetofilm.http')
 ERROR_CODES = {400: 'bad_request', 401: 'admin_required', 403: 'forbidden', 404: 'not_found',
-               405: 'method_not_allowed', 409: 'conflict', 413: 'payload_too_large', 422: 'validation_error',
+               405: 'method_not_allowed', 408: 'request_timeout', 409: 'conflict', 413: 'payload_too_large', 422: 'validation_error',
                429: 'quota_exceeded', 500: 'internal_error', 503: 'unavailable', 507: 'insufficient_storage'}
 
 
@@ -63,6 +64,8 @@ def create_app(config=None, service=None):
         fields = ['.'.join(str(p) for p in item['loc']) for item in exc.errors()]
         return error_response(request, 422, '请求参数未通过校验，请按接口文档检查字段', fields)
 
+    application.add_middleware(BodyLimitMiddleware, error_response=error_response)
+
     @application.middleware('http')
     async def guard(request, call_next):
         request.state.request_id = secrets.token_hex(12)
@@ -103,12 +106,6 @@ def create_app(config=None, service=None):
                     return reject(403, '拒绝跨站写入请求')
             except ValueError:
                 return reject(403, '来源地址无效')
-            size = request.headers.get('content-length', '')
-            limit = settings.max_script * 6 + 196608
-            if not size.isdigit() or int(size) > limit:
-                return reject(413, '请求体缺少长度或超过限制')
-            if int(size) and request.headers.get('content-type', '').split(';')[0].strip().lower() != 'application/json':
-                return reject(400, '写入接口仅接受 application/json')
         header = request.headers.get('x-access-token', '')
         admin = bool(settings.token) and ((bool(header) and hmac.compare_digest(header.encode(), settings.token.encode())) or
                                          valid_session(settings.token, request.cookies.get('ntf_admin', '')))
