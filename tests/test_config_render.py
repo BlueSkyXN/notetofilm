@@ -50,6 +50,29 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Config.from_env({'ACCESS_TOKEN': 'test', 'MAX_ACTIVE_TASKS': '0'})
 
+    def test_v3_migration_adds_idempotency_without_changing_history(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = Store(Path(folder))
+            store.open()
+            with store.connect(write=True) as conn:
+                conn.execute("INSERT INTO tasks(id,script,status,video_path) VALUES(1,'keep','done','video.mp4')")
+                conn.execute("INSERT INTO scenes(task_id,idx,narration) VALUES(1,0,'keep scene')")
+                conn.execute('DROP TABLE image_requests')
+                conn.execute('PRAGMA user_version=3')
+            media = Path(folder) / 'video.mp4'
+            media.write_bytes(b'unchanged history')
+            store.close()
+            store.open()
+            try:
+                with store.connect() as conn:
+                    self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 4)
+                    self.assertEqual(conn.execute('SELECT COUNT(*) FROM image_requests').fetchone()[0], 0)
+                    self.assertEqual(conn.execute('SELECT script,status,video_path FROM tasks').fetchone()[:], ('keep', 'done', 'video.mp4'))
+                    self.assertEqual(conn.execute('SELECT narration FROM scenes').fetchone()[0], 'keep scene')
+                self.assertEqual(media.read_bytes(), b'unchanged history')
+            finally:
+                store.close()
+
     def test_blank_line_segmentation(self):
         c = Config.from_env({'ALLOW_UNAUTHENTICATED_LOCAL': '1'})
         self.assertEqual(Providers(c).plan('line 1\nline 2\n\nparagraph 2'), ['line 1\nline 2', 'paragraph 2'])
@@ -112,6 +135,8 @@ class RenderTests(unittest.TestCase):
                 self.assertEqual(service.detail(tid)['status'], 'review')
                 for kind in ('img', 'aud'):
                     service.gate(tid, 0, kind, True, 1)
+                service.models.secret_values['OPENAI_API_KEY'] = ''
+                self.assertFalse(service.detail(tid)['model_available']['image'])
                 service.render(tid)
                 executor.run()
                 detail = service.detail(tid)

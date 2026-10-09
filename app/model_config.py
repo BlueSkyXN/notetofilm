@@ -7,9 +7,9 @@ import tomllib
 from dataclasses import replace
 from pathlib import Path
 from threading import RLock
-from urllib.parse import urlsplit
-
 from fastapi import HTTPException
+
+from .gateway import validate_gateway
 
 SCHEMA = {
     'llm': {'base_url': str, 'model': str, 'api_key_env': str},
@@ -84,12 +84,7 @@ class ModelConfig:
         for section in ('llm', 'image'):
             values = document[section]
             base = values['base_url']
-            if base:
-                url = urlsplit(base)
-                if url.scheme != 'https' or not url.hostname or url.username or url.password or url.query or url.fragment or url.port not in (None, 443):
-                    raise ValueError(f'{section}.base_url 必须为无凭据、无查询参数的 HTTPS 地址（443 端口）')
-                if any(c.isspace() for c in base):
-                    raise ValueError(f'{section}.base_url 不能包含空白')
+            validate_gateway(base)
             if values['api_key_env'] not in SECRET_NAMES:
                 raise ValueError(f'{section}.api_key_env 只能引用模型密钥，不能读取其他环境变量')
             if not values['model'].strip() or len(values['model']) > 200:
@@ -103,17 +98,30 @@ class ModelConfig:
             raise ValueError('TTS 仅支持 edge-tts，音色名称无效')
         return document
 
-    def effective(self, document):
+    def effective(self, document, required=('llm', 'image')):
         llm, image, tts = document['llm'], document['image'], document['tts']
-        for name, item in [('llm', llm), ('image', image)]:
+        for name in required:
+            item = document[name]
             if item['base_url'] and not self.secret_values[item['api_key_env']]:
-                raise ValueError(f'{name} 引用的密钥尚未配置，请先在部署环境或 Secrets 设置')
+                raise ValueError(f'{name} 引用的密钥尚未配置，请联系管理员恢复对应模型配置')
         return replace(self.settings, base='', key='',
                        llm_base=llm['base_url'].rstrip('/'), llm_key=self.secret_values[llm['api_key_env']] if llm['base_url'] else '',
                        llm_model=llm['model'], image_base=image['base_url'].rstrip('/'),
                        image_key=self.secret_values[image['api_key_env']] if image['base_url'] else '',
                        image_model=image['model'], image_size=image['size'], image_quality=image['quality'],
                        image_timeout=image['timeout_seconds'], style=image['style'], voice=tts['voice'])
+
+    def document_for(self, text=''):
+        with self.lock:
+            return self.parse(text or self.active_text)
+
+    def availability(self, text=''):
+        document = self.document_for(text)
+        return {name: not item['base_url'] or bool(self.secret_values[item['api_key_env']])
+                for name, item in document.items() if name in ('llm', 'image')}
+
+    def has_gateway(self, text, kind):
+        return bool(self.document_for(text)[kind]['base_url'])
 
     def write(self, path, text):
         fd, temporary = tempfile.mkstemp(prefix='.config-', dir=self.path.parent)
@@ -136,7 +144,6 @@ class ModelConfig:
                 self.write(self.path, text)
             text = self.path.read_text()
             document = self.parse(text)
-            self.effective(document)
             self.active_text, self.active = text, document
 
     def snapshot(self):
@@ -147,8 +154,8 @@ class ModelConfig:
         with self.lock:
             return self.effective(self.active)
 
-    def for_task(self, text):
-        return self.effective(self.parse(text)) if text else self.current()
+    def for_task(self, text, required=()):
+        return self.effective(self.document_for(text), required)
 
     def info(self):
         with self.lock:

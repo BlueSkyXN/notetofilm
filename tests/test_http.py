@@ -119,7 +119,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.call(f'/api/v1/tasks/{tid}/files/anything.png', headers=bob)[0], 404)
         paths = ['generate', 'plan', 'archive', 'retry', 'render', 'scenes/0/gate', 'scenes/0/regen-image', 'scenes/0/regen-audio']
         bodies = [{'confirmed': True, 'revision': task['plan_revision']}, {'scenes': ['x'], 'revision': task['plan_revision']}, {}, {}, {},
-                  {'gate': 'img', 'passed': True, 'revision': 1}, {'confirmed': True}, {}]
+                  {'gate': 'img', 'passed': True, 'revision': 1}, {'confirmed': True, 'expected_revision': 0, 'idempotency_key': 'owner-test-request-key'}, {}]
         for path, body in zip(paths, bodies):
             method = 'PUT' if path in ('plan', 'scenes/0/gate') else 'POST'
             self.assertEqual(self.call(f'/api/v1/tasks/{tid}/{path}', body, bob, method)[0], 404, path)

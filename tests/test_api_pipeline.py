@@ -71,6 +71,28 @@ class ApiPipelineTests(unittest.TestCase):
                 self.assertEqual(call(status_url + '/generate', {'confirmed': True, 'revision': plan['plan_revision']})[0], 202)
                 detail = wait_for('review')
                 scene = detail['scenes'][0]
+                regen_url = status_url + '/scenes/0/regen-image'
+                self.assertEqual(call(regen_url, {'confirmed': True})[0], 422)
+                regen = {'confirmed': True, 'expected_revision': scene['img_revision'], 'idempotency_key': 'http-pipeline-image-intent'}
+                code, _, original = call(regen_url, regen)
+                self.assertEqual(code, 202)
+                self.assertTrue(original['operation_id'])
+                for _ in range(200):
+                    detail = call(status_url)[2]
+                    if not detail['busy']:
+                        break
+                    time.sleep(.05)
+                self.assertEqual(detail['status'], 'review')
+                self.assertEqual(detail['image_requests'], 2)
+                code, _, replay = call(regen_url, regen)
+                self.assertEqual(code, 202)
+                self.assertTrue(replay['replayed'])
+                self.assertEqual(replay['operation_id'], original['operation_id'])
+                self.assertEqual(call(status_url)[2]['image_requests'], 2)
+                self.assertEqual(call(regen_url, {**regen, 'expected_revision': 2})[0], 409)
+                self.assertEqual(call('/api/v1/session', client=other)[0], 200)
+                self.assertEqual(call(regen_url, regen, client=other)[0], 404)
+                scene = detail['scenes'][0]
                 self.assertNotIn('image_path', scene)
                 self.assertNotIn('video_path', detail)
                 for kind in ('image', 'audio'):

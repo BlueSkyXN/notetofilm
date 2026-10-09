@@ -59,7 +59,7 @@ class Store:
     def migrate(self):
         with self.connect(write=True) as conn:
             version = conn.execute('PRAGMA user_version').fetchone()[0]
-            if version > 3:
+            if version > 4:
                 raise RuntimeError('数据库版本高于当前程序，请勿降级启动')
             conn.execute('CREATE TABLE IF NOT EXISTS tasks ('
                          'id INTEGER PRIMARY KEY AUTOINCREMENT, script TEXT NOT NULL, '
@@ -105,7 +105,11 @@ class Store:
             conn.execute('CREATE INDEX IF NOT EXISTS task_owner ON tasks(owner,id)')
             conn.execute('CREATE TABLE IF NOT EXISTS daily_usage ('
                          'day TEXT NOT NULL, kind TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY(day,kind))')
-            conn.execute('PRAGMA user_version=3')
+            conn.execute('CREATE TABLE IF NOT EXISTS image_requests ('
+                         'owner TEXT NOT NULL, request_key TEXT NOT NULL, parameter_hash TEXT NOT NULL, '
+                         'task_id INTEGER NOT NULL REFERENCES tasks(id), operation_id TEXT NOT NULL, '
+                         'created_at TEXT NOT NULL, PRIMARY KEY(owner,request_key))')
+            conn.execute('PRAGMA user_version=4')
 
     def recover(self):
         with self.connect(write=True) as conn:

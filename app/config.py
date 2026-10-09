@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .gateway import validate_gateway
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -56,6 +58,7 @@ class Config:
     max_daily_images: int = 60
     max_daily_audio: int = 120
     max_daily_renders: int = 30
+    request_body_timeout: int = 30
 
     @property
     def llm_connection(self):
@@ -103,6 +106,7 @@ class Config:
             max_daily_images=positive(env, 'MAX_DAILY_IMAGE_REQUESTS', 60),
             max_daily_audio=positive(env, 'MAX_DAILY_AUDIO_REQUESTS', 120),
             max_daily_renders=positive(env, 'MAX_DAILY_RENDER_REQUESTS', 30),
+            request_body_timeout=positive(env, 'REQUEST_BODY_TIMEOUT', 30),
         )
 
     def validate(self):
@@ -116,14 +120,13 @@ class Config:
         for label, base, key in [('OPENAI', self.base, self.key), ('LLM', self.llm_base, self.llm_key), ('IMAGE', self.image_base, self.image_key)]:
             if base and not key and not (self.data / 'config.toml').is_file():
                 raise ValueError(f'{label} 地址已配置但缺少 API key')
-            if base:
-                url = urlsplit(base)
-                if url.scheme not in ('http', 'https') or not url.hostname or url.username or url.password or url.query or url.fragment:
-                    raise ValueError(f'{label} 地址必须是无凭据、无查询参数的 HTTP(S) API 地址')
+            validate_gateway(base)
         if not self.allowed_hosts or any('/' in h or '*' in h for h in self.allowed_hosts):
             raise ValueError('ALLOWED_HOSTS 必须是明确的主机名列表，不允许通配符')
         if self.max_active < 1 or not 1 <= self.max_render <= self.max_active:
             raise ValueError('并发配置必须满足 1 <= MAX_RENDER_TASKS <= MAX_ACTIVE_TASKS')
+        if self.request_body_timeout <= 0 or self.max_script < 1:
+            raise ValueError('请求体读取超时和文稿限额必须为正数')
         if min(self.max_image_requests, self.min_free_mb, self.max_audio_seconds, self.max_video_seconds) < 1:
             raise ValueError('费用、磁盘和媒体时长限制必须是正数')
         if self.webhook and urlsplit(self.webhook).scheme != 'https':

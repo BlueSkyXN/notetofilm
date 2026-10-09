@@ -58,7 +58,25 @@ Generation endpoints return HTTP 202 immediately after admission:
 
 `POST /tasks` also returns a `Location` header. Poll the returned URL rather than resubmitting. Status transitions include `generating`, `planned`, `review`, `rendering`, `done`, `failed`, `interrupted`. A 202 means accepted, not completed and not paid-provider success.
 
-`POST /tasks/{id}/retry` with `{"confirmed":false}` may return 200 with `accepted:false` and `needs_confirm:true`; ask the user before repeating with `confirmed:true`. A timeout can mean an upstream call was billed. There are no automatic retries, and clients must not automatically retry mutation calls. Server-side ownership, revisions, active-operation checks and duplicate-script protection remain in force; this is not a universal idempotency-key implementation.
+`POST /tasks/{id}/retry` with `{"confirmed":false}` may return 200 with `accepted:false` and `needs_confirm:true`; ask the user before repeating with `confirmed:true`. A timeout can mean an upstream call was billed. There are no automatic retries, and clients must not automatically retry mutation calls. Server-side ownership, revisions, active-operation checks and duplicate-script protection remain in force; only paid image regeneration has persistent request-key replay protection; other mutation endpoints do not implement universal idempotency.
+
+## Image regeneration replay protection
+
+`POST /tasks/{id}/scenes/{idx}/regen-image` requires:
+
+```json
+{"confirmed":true,"expected_revision":1,"idempotency_key":"a-new-uuid-for-this-intent"}
+```
+
+Use the current `img_revision`. Keep the same key and parameters when the outcome of submission is unknown; do not create a new key for a network retry. Keys are scoped to the authenticated requester and persist in SQLite. Same key/same parameters returns the original `operation_id` with `replayed:true`, including after completion, failure or restart. Replay does not dispatch work or consume another quota. Same key/different parameters and new intents with stale revision return 409. A 202 replay means the original request was admitted, not that it succeeded; poll `status_url`. An interrupted or failed operation still requires explicit recovery confirmation when new paid calls are needed.
+
+Old image-regeneration clients without the required fields receive 422. Deploy frontend/backend together. Audio regeneration keeps its existing contract.
+
+## Request bodies and model availability
+
+The application limits actual received bytes before business dispatch to `MAX_SCRIPT_CHARS * 6 + 196608` (316,608 bytes by default), including whitespace. Legal chunked JSON is allowed without Content-Length. Duplicate/conflicting framing headers or a declared/actual mismatch are rejected; actual overflow returns 413, total read timeout returns 408. JSON field length validation is an additional check, not a replacement. HTTP parsers/proxies may reject malformed traffic before the application; configure independent proxy limits and timeouts.
+
+Task details expose only `model_available.llm`/`image` booleans. Removed provider keys do not block historical detail, downloads, local composition or completed-output recovery. Operations that require a missing key return 503 before that provider is called. Snapshot bindings are retained, never silently replaced with the current gateway.
 
 ## API-only example (no real credentials or external calls in this example)
 
@@ -106,7 +124,7 @@ All errors use the same JSON envelope, including middleware, validation and unex
 
 `X-Request-ID` matches the body. Input validation reports field locations, not the original input values. Unexpected errors expose neither stack traces nor upstream responses. Codes include `admin_required`, `forbidden`, `not_found`, `conflict`, `validation_error`, `quota_exceeded`, `unavailable`, `insufficient_storage`.
 
-Response schemas whitelist public fields. Task responses omit owner identifiers, raw configuration snapshots, internal operation IDs, database columns and local file paths. Model keys remain in environment/Secrets, configuration files store only approved key references. Request/response documentation contains schemas only, never live values.
+Response schemas whitelist public fields. Task details omit owner identifiers, raw configuration snapshots, database columns and local file paths. Image-regeneration admission/replay responses expose only their opaque operation ID for correlation, not internal operation metadata. Model keys remain in environment/Secrets, configuration files store only approved key references. Request/response documentation contains schemas only, never live values.
 
 ## Persistence and verification
 

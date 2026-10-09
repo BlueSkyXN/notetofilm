@@ -7,7 +7,7 @@ from fastapi.security import APIKeyCookie, APIKeyHeader
 
 from .auth import SESSION_SECONDS, VISITOR_SECONDS, signed_session
 from .schemas import (Accepted, ConfigEdit, ConfigRestore, Confirm, ErrorResponse, Gate, Generate,
-                      Health, Login, ModelSettings, Ok, Plan, SessionInfo, Submit, TaskDetail, TaskList)
+                      Health, Login, ModelSettings, Ok, Plan, RegenImage, SessionInfo, Submit, TaskDetail, TaskList)
 
 admin_header = APIKeyHeader(name='X-Access-Token', scheme_name='AdminToken', auto_error=False)
 admin_cookie = APIKeyCookie(name='ntf_admin', scheme_name='AdminCookie', auto_error=False)
@@ -36,11 +36,12 @@ def accepted(tid, result=None):
     result = result or {}
     confirmation = bool(result.get('needs_confirm'))
     return Accepted(task_id=tid, status_url=f'/api/v1/tasks/{tid}', accepted=not confirmation,
-                    needs_confirm=confirmation, message=result.get('message'))
+                    needs_confirm=confirmation, message=result.get('message'),
+                    operation_id=result.get('operation_id'), replayed=result.get('replayed', False))
 
 
 def create_router():
-    router = APIRouter(responses={code: {'model': ErrorResponse} for code in (400, 401, 403, 404, 409, 413, 422, 429, 500, 503, 507)})
+    router = APIRouter(responses={code: {'model': ErrorResponse} for code in (400, 401, 403, 404, 408, 409, 413, 422, 429, 500, 503, 507)})
     tasks = APIRouter(prefix='/tasks', tags=['Tasks'], dependencies=[Depends(visitor_access)])
     admin = APIRouter(prefix='/admin/config', tags=['Admin configuration'], dependencies=[Depends(administrator)])
 
@@ -113,8 +114,9 @@ def create_router():
         return owned(request, tid).gate(tid, idx, body.gate, body.passed, body.revision)
 
     @tasks.post('/{tid}/scenes/{idx}/regen-image', status_code=202, response_model=Accepted)
-    def regen_image(tid: int, idx: int, body: Confirm, request: Request):
-        return accepted(tid, owned(request, tid).regen(tid, idx, 'img', body.confirmed))
+    def regen_image(tid: int, idx: int, body: RegenImage, request: Request):
+        return accepted(tid, owned(request, tid).regen(tid, idx, 'img', body.confirmed,
+                        body.expected_revision, body.idempotency_key, request.state.owner))
 
     @tasks.post('/{tid}/scenes/{idx}/regen-audio', status_code=202, response_model=Accepted)
     def regen_audio(tid: int, idx: int, request: Request):

@@ -4,6 +4,25 @@ if(!tid)throw new Error('任务地址无效');
 document.getElementById('task-ref').textContent=`VIDEO WORKSPACE / 任务 #${tid}`;
 let current=null,pending=false,loading=false,editing=false,editorRevision=null;
 const cards=new Map();
+const intentStorage=`ntf-image-intents:${tid}`;
+let imageIntents={};
+try{imageIntents=JSON.parse(sessionStorage.getItem(intentStorage)||'{}');}catch{}
+function storeImageIntents(){try{sessionStorage.setItem(intentStorage,JSON.stringify(imageIntents));}catch{}}
+async function redoImage(scene){
+  let intent=imageIntents[scene.idx];
+  if(!intent){
+    intent={confirmed:true,expected_revision:scene.img_revision,idempotency_key:crypto.randomUUID()};
+    imageIntents[scene.idx]=intent;storeImageIntents();
+  }
+  try{
+    const result=await request(`/api/v1/tasks/${tid}/scenes/${scene.idx}/regen-image`,intent);
+    delete imageIntents[scene.idx];storeImageIntents();
+    return result;
+  }catch(error){
+    if(error.status&&error.status<500){delete imageIntents[scene.idx];storeImageIntents();}
+    throw error;
+  }
+}
 const stateLabel={pending:'待生成',running:'生成中',ready:'待确认',placeholder:'占位图·需重做',failed:'生成失败',unknown:'请求结果未知'};
 const titles={submitted:'正在准备分镜',generating:'正在生成',planned:'确认你的分镜',review:'检查画面与旁白',rendering:'正在合成视频',done:'成片已准备好',failed:'任务需要处理',interrupted:'任务已中断'};
 function controls(){
@@ -13,7 +32,7 @@ function controls(){
   document.getElementById('compose').hidden=current.status!=='review'||!!current.archived;
   document.getElementById('compose').disabled=locked||!ready;
   document.getElementById('generate').hidden=current.status!=='planned'||!!current.archived;
-  document.getElementById('generate').disabled=locked||editing;
+  document.getElementById('generate').disabled=locked||editing||current.model_available?.image===false;
   document.getElementById('archive').hidden=!!current.archived;
   document.getElementById('archive').disabled=locked||editing;
   document.getElementById('save-plan').disabled=locked||!editing;
@@ -54,7 +73,7 @@ function update(task){
   }
   const img=task.scenes.filter(s=>s.img_ok).length,aud=task.scenes.filter(s=>s.aud_ok).length;
   document.getElementById('counts').textContent=task.status==='planned'?`共 ${task.expected_scenes} 镜 · 核对旁白完整性`:`图文 ${img}/${task.expected_scenes} 已确认 · 配音 ${aud}/${task.expected_scenes} 已确认`;
-  const guidance=archived?'此任务只读。需要重新制作时，可返回工作台提交文稿。':done?'先播放检查，再下载保存。素材明细保留在下方。':task.status==='planned'?`确认后将生成 ${task.expected_scenes} 张图片和配音。${task.configured?'外部生成请求可能计费。':'当前只会生成占位图，无法合成正式成片。'}`:task.status==='rendering'?'正在合成已确认的素材，完成后会显示播放器。':['failed','interrupted'].includes(task.status)?'已完成的素材会保留。请查看错误说明，再决定是否恢复。':task.busy?'后台正在处理，页面会自动更新。请勿重复提交。':'逐镜查看图片、试听配音。重做后需要重新确认新版本。';
+  const guidance=archived?'此任务只读。需要重新制作时，可返回工作台提交文稿。':done?'先播放检查，再下载保存。素材明细保留在下方。':task.status==='planned'?`确认后将生成 ${task.expected_scenes} 张图片和配音。${task.model_available?.image===false?'图片供应商密钥当前不可用，请联系管理员；原分镜与素材仍保留。':task.configured?'外部生成请求可能计费。':'当前只会生成占位图，无法合成正式成片。'}`:task.status==='rendering'?'正在合成已确认的素材，完成后会显示播放器。':['failed','interrupted'].includes(task.status)?'已完成的素材会保留。请查看错误说明，再决定是否恢复。':task.busy?'后台正在处理，页面会自动更新。请勿重复提交。':'逐镜查看图片、试听配音。重做后需要重新确认新版本。';
   document.getElementById('boundary').textContent=guidance;
   document.getElementById('next-step').textContent=task.status==='review'&&!task.busy&&!archived?(img===task.expected_scenes&&aud===task.expected_scenes?'全部素材已确认，可以合成视频。':`还需确认 ${task.expected_scenes-img} 张图片、${task.expected_scenes-aud} 段配音。`):'';
   document.getElementById('request-details').hidden=false;
@@ -144,7 +163,8 @@ document.getElementById('scenes').addEventListener('click',event=>{
   const idx=Number(button.closest('.scene').dataset.idx),scene=current.scenes.find(s=>s.idx===idx);
   const [kind,type]=button.dataset.action.split('-');
   if(type==='gate')action(()=>request(`/api/v1/tasks/${tid}/scenes/${idx}/gate`,{gate:kind,passed:!scene[`${kind}_ok`],revision:scene[`${kind}_revision`]},'PUT'));
-  else if(kind==='aud'||confirm('重做此图会重新请求生图服务，可能再次计费，继续？'))action(()=>request(`/api/v1/tasks/${tid}/scenes/${idx}/regen-${kind==='img'?'image':'audio'}`,{confirmed:true}));
+  else if(kind==='aud')action(()=>request(`/api/v1/tasks/${tid}/scenes/${idx}/regen-audio`,{}));
+  else if(confirm('重做此图会请求生图服务，可能计费；连接异常后再提交同一意图将沿用幂等键。继续？'))action(()=>redoImage(scene));
 });
 window.addEventListener('beforeunload',event=>{if(editing){event.preventDefault();event.returnValue='';}});
 load();setInterval(()=>{if(!document.hidden&&!editing&&!pending)load();},2500);

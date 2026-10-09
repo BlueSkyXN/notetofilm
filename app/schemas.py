@@ -21,6 +21,11 @@ class Confirm(Input):
     confirmed: bool = False
 
 
+class RegenImage(Confirm):
+    expected_revision: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=16, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
+
+
 class Generate(Confirm):
     revision: int = Field(ge=1)
 
@@ -81,6 +86,8 @@ class Accepted(BaseModel):
     accepted: bool = True
     needs_confirm: bool = False
     message: str | None = None
+    operation_id: str | None = None
+    replayed: bool = False
 
 
 class TaskSummary(BaseModel):
@@ -129,6 +136,7 @@ class TaskDetail(BaseModel):
     archived: int
     busy: bool
     configured: bool
+    model_available: dict[str, bool]
     image_request_limit: int
     config_revision: str
     video: str | None = None

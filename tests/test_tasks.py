@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -97,6 +98,10 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(self.service.detail(tid)['status'], 'review')
         return tid
 
+    def redo_image(self, tid, idx=0, confirmed=True):
+        revision = self.service.detail(tid)['scenes'][idx]['img_revision']
+        return self.service.regen(tid, idx, 'img', confirmed, revision, uuid.uuid4().hex)
+
     def approve(self, tid):
         for scene in self.service.detail(tid)['scenes']:
             for kind in ('img', 'aud'):
@@ -147,10 +152,10 @@ class TaskTests(unittest.TestCase):
     def test_regen_blocks_second_regen_gate_and_render(self):
         tid = self.review()
         self.approve(tid)
-        self.service.regen(tid, 0, 'img', True)
+        self.redo_image(tid)
         detail = self.service.detail(tid)
         self.assertTrue(detail['busy'])
-        self.raises_status(409, self.service.regen, tid, 0, 'img', True)
+        self.raises_status(409, self.redo_image, tid)
         self.raises_status(409, self.service.gate, tid, 0, 'img', True, 1)
         self.raises_status(409, self.service.render, tid)
         self.executor.run()
@@ -179,7 +184,7 @@ class TaskTests(unittest.TestCase):
     def test_uncertain_paid_result_requires_confirmation_and_clears_busy(self):
         tid = self.review()
         self.providers.fail_image = 'first'
-        self.service.regen(tid, 0, 'img', True)
+        self.redo_image(tid)
         self.executor.run()
         detail = self.service.detail(tid)
         self.assertFalse(detail['busy'])
@@ -207,7 +212,7 @@ class TaskTests(unittest.TestCase):
 
     def test_restart_covers_submitted_and_running_operations(self):
         tid = self.review()
-        self.service.regen(tid, 0, 'img', True)
+        self.redo_image(tid)
         with self.service.store.connect(write=True) as conn:
             submitted = conn.execute("INSERT INTO tasks(script,status) VALUES('fixture','submitted')").lastrowid
         self.service.store.recover()
@@ -256,7 +261,7 @@ class TaskTests(unittest.TestCase):
     def test_media_versions_do_not_overwrite(self):
         tid = self.review()
         old = self.service.detail(tid)['scenes'][0]['image_path']
-        self.service.regen(tid, 0, 'img', True)
+        self.redo_image(tid)
         self.executor.run()
         new = self.service.detail(tid)['scenes'][0]['image_path']
         self.assertNotEqual(old, new)
@@ -267,7 +272,7 @@ class TaskTests(unittest.TestCase):
         self.approve(tid)
         before = self.service.detail(tid)['scenes'][0]
         self.providers.fail_image = 'first'
-        self.service.regen(tid, 0, 'img', True)
+        self.redo_image(tid)
         self.executor.run()
         after = self.service.detail(tid)['scenes'][0]
         self.assertEqual(before['image_path'], after['image_path'])
@@ -360,13 +365,13 @@ class TaskTests(unittest.TestCase):
         self.service.config = replace(self.config, max_image_requests=3)
         tid = self.review()
         self.assertEqual(self.service.detail(tid)['image_requests'], 3)
-        self.raises_status(429, self.service.regen, tid, 0, 'img', True)
+        self.raises_status(429, self.redo_image, tid)
         self.assertEqual(len(self.providers.images), 3)
 
     def test_image_request_failure_not_free_budget(self):
         tid = self.review()
         self.providers.fail_image = 'first'
-        self.service.regen(tid, 0, 'img', True)
+        self.redo_image(tid)
         self.executor.run()
         self.assertEqual(self.service.detail(tid)['image_requests'], 4)
         self.assertEqual(self.service.detail(tid)['scenes'][0]['img_state'], 'unknown')

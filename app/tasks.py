@@ -80,14 +80,20 @@ class Tasks:
         if not admin and task['owner'] != owner:
             raise HTTPException(404, '任务不存在')
 
-    def task_config(self, task):
-        return self.models.for_task(task['model_config']) if task.get('model_config') else self.config
+    def task_config(self, task, required=()):
+        try:
+            return self.models.for_task(task.get('model_config', ''), required)
+        except ValueError:
+            raise HTTPException(503, '此任务所需的模型配置当前不可执行，请联系管理员；历史素材仍可查看和下载') from None
 
-    def provider_for(self, tid):
+    def has_gateway(self, task, kind):
+        return self.models.has_gateway(task.get('model_config', ''), kind)
+
+    def provider_for(self, tid, required=()):
+        with self.store.connect() as conn:
+            settings = self.task_config(self.task(conn, tid), required)
         if self.injected_provider:
             return self.providers
-        with self.store.connect() as conn:
-            settings = self.task_config(self.task(conn, tid))
         provider = Providers(settings)
         provider.stopping = self.stopping
         return provider
@@ -113,7 +119,7 @@ class Tasks:
 
     def capacity(self, conn, kind):
         if shutil.disk_usage(self.config.data).free < self.config.min_free_mb * 1024 * 1024:
-            raise HTTPException(507, '磁盘可用空间低于安全阈值，请归档数据后再试')
+            raise HTTPException(507, '磁盘可用空间低于安全阈值，请管理员备份并清理或迁移存储；任务归档不会释放空间')
         if self.closed:
             raise HTTPException(503, '服务正在关闭')
         active = conn.execute('SELECT COUNT(*) FROM tasks WHERE operation_id IS NOT NULL').fetchone()[0]
@@ -193,6 +199,7 @@ class Tasks:
             raise HTTPException(422, f'文稿长度必须为 1–{self.config.max_script} 字符')
         fingerprint = script_digest(script)
         snapshot = self.models.snapshot()
+        self.task_config({'model_config': snapshot}, ('llm',))
         with self.store.connect(write=True) as conn:
             duplicate = conn.execute("SELECT id FROM tasks WHERE script_hash=? AND owner=? AND status!='done' AND archived=0 LIMIT 1", (fingerprint, owner)).fetchone()
             if duplicate:
@@ -211,7 +218,7 @@ class Tasks:
         return {'task_id': tid}
 
     def plan(self, tid, operation, script):
-        provider = self.provider_for(tid)
+        provider = self.provider_for(tid, ('llm',))
         with self.store.connect(write=True) as conn:
             if self.task_config(self.task(conn, tid)).llm_connection[1]:
                 self.reserve(conn, 'llm', self.config.max_daily_llm)
@@ -247,7 +254,7 @@ class Tasks:
         return {'ok': True}
 
     def image_budget(self, task, amount):
-        if self.task_config(task).image_connection[1] and task['image_requests'] + amount > self.config.max_image_requests:
+        if amount and self.has_gateway(task, 'image') and task['image_requests'] + amount > self.config.max_image_requests:
             raise HTTPException(429, '此任务生图请求数已达配置上限；不会继续调用付费接口')
 
     def generate(self, tid, confirmed, revision=None):
@@ -259,6 +266,7 @@ class Tasks:
             self.verify_plan(task, self.scenes(conn, tid))
             if revision is not None and task['plan_revision'] != revision:
                 raise HTTPException(409, '分镜计划已更新，请刷新后确认')
+            self.task_config(task, ('image',))
             self.image_budget(task, task['expected_scenes'])
             operation = self.claim(conn, tid, 'generate', 'generating')
         self.dispatch(tid, operation, lambda: self.generate_missing(tid, operation))
@@ -277,7 +285,7 @@ class Tasks:
             for kind in ('img', 'aud'):
                 state = scene[f'{kind}_state']
                 path = scene['image_path' if kind == 'img' else 'audio_path']
-                if recover_video and kind == 'img' and self.task_config(task).image_connection[1] and not retry_images_confirmed and (state not in ('ready', 'placeholder') or not path or not (self.config.data / str(tid) / path).is_file()):
+                if recover_video and kind == 'img' and self.has_gateway(task, 'image') and not retry_images_confirmed and (state not in ('ready', 'placeholder') or not path or not (self.config.data / str(tid) / path).is_file()):
                     self.fail(tid, operation, '图片状态已变化，需人工确认后重新请求生图，未自动计费。')
                     return
                 if state in ('ready', 'placeholder') and path:
@@ -288,7 +296,7 @@ class Tasks:
                         with self.store.connect(write=True) as conn:
                             conn.execute(f"UPDATE scenes SET {kind}_state='failed',{kind}_approved=0,{kind}_ok=0,{kind}_error=? WHERE task_id=? AND idx=?",
                                          ('已有素材损坏或缺失，请重新生成。', tid, scene['idx']))
-                        if kind == 'img' and self.task_config(task).image_connection[1] and not retry_images_confirmed:
+                        if kind == 'img' and self.has_gateway(task, 'image') and not retry_images_confirmed:
                             self.fail(tid, operation, '检测到图片损坏，需再次人工确认后请求生图，未自动计费。')
                             return
                 self.asset(tid, operation, scene['idx'], kind)
@@ -301,7 +309,7 @@ class Tasks:
             task = self.task(conn, tid)
             if task['operation_id'] != operation:
                 raise RuntimeError('操作所有权失效')
-            settings = self.task_config(task)
+            settings = self.task_config(task, ('image',) if kind == 'img' else ())
             if kind == 'img' and settings.image_connection[1]:
                 self.image_budget(task, 1)
                 self.reserve(conn, 'image', self.config.max_daily_images)
@@ -316,7 +324,7 @@ class Tasks:
         suffix = '.png' if kind == 'img' else '.mp3'
         output = folder / f'{idx:03d}-{kind}{suffix}'
         temp = folder / f'{idx:03d}-{kind}.part{suffix}'
-        provider = self.provider_for(tid)
+        provider = self.provider_for(tid, ('image',) if kind == 'img' else ())
         placeholder = kind == 'img' and not settings.image_connection[1]
         try:
             if placeholder:
@@ -344,24 +352,42 @@ class Tasks:
             if kind == 'img':
                 conn.execute('UPDATE scenes SET img_placeholder=? WHERE task_id=? AND idx=?', (int(placeholder), tid, idx))
 
-    def regen(self, tid, idx, kind, confirmed):
+    def regen(self, tid, idx, kind, confirmed, expected_revision=None, request_key=None, requester=None):
+        if kind not in ('img', 'aud'):
+            raise HTTPException(422, '素材类型无效')
+        if kind == 'img' and (type(expected_revision) is not int or expected_revision < 0 or not request_key):
+            raise HTTPException(422, '生图重做必须提供当前素材版本和幂等键')
+        parameter_hash = script_digest(f'{tid}:{idx}:{kind}:{expected_revision}:{confirmed}')
         with self.store.connect(write=True) as conn:
             task = self.task(conn, tid)
+            owner = requester or task['owner']
+            if kind == 'img':
+                previous = conn.execute('SELECT * FROM image_requests WHERE owner=? AND request_key=?', (owner, request_key)).fetchone()
+                if previous:
+                    if previous['parameter_hash'] != parameter_hash:
+                        raise HTTPException(409, '相同幂等键已用于不同参数，未发起新的生图请求')
+                    return {'ok': True, 'operation_id': previous['operation_id'], 'replayed': True}
             self.idle(task, {'review'})
-            if kind == 'img' and (not self.task_config(task).image_connection[1] or not confirmed):
-                raise HTTPException(409, '重做图需要配置网关并确认付费请求')
-            scene = conn.execute('SELECT id FROM scenes WHERE task_id=? AND idx=?', (tid, idx)).fetchone()
+            scene = conn.execute('SELECT * FROM scenes WHERE task_id=? AND idx=?', (tid, idx)).fetchone()
             if scene is None:
                 raise HTTPException(404, '镜不存在')
             if kind == 'img':
+                if scene['img_revision'] != expected_revision:
+                    raise HTTPException(409, '图片已更新，请刷新后确认是否重做')
+                if not self.has_gateway(task, 'image') or not confirmed:
+                    raise HTTPException(409, '重做图需要配置网关并确认付费请求')
+                self.task_config(task, ('image',))
                 self.image_budget(task, 1)
             operation = self.claim(conn, tid, kind, 'review', idx)
             conn.execute(f"UPDATE scenes SET {kind}_state='running',{kind}_approved=0,{kind}_ok=0 WHERE task_id=? AND idx=?", (tid, idx))
+            if kind == 'img':
+                conn.execute('INSERT INTO image_requests(owner,request_key,parameter_hash,task_id,operation_id,created_at) VALUES(?,?,?,?,?,?)',
+                             (owner, request_key, parameter_hash, tid, operation, now()))
         def work():
             self.asset(tid, operation, idx, kind)
             self.finish(tid, operation, 'review')
         self.dispatch(tid, operation, work)
-        return {'ok': True, 'operation_id': operation}
+        return {'ok': True, 'operation_id': operation, 'replayed': False}
 
     def gate(self, tid, idx, kind, passed, revision):
         if kind not in ('img', 'aud'):
@@ -405,13 +431,17 @@ class Tasks:
             has_plan = task['plan_complete'] and len(scenes) == task['expected_scenes'] and bool(scenes)
             image_missing = any(s['img_state'] not in ('ready', 'placeholder') or not s['image_path'] or
                                 not (self.config.data / str(tid) / s['image_path']).is_file() for s in scenes)
-            needs_confirm = not has_plan or (bool(self.task_config(task).image_connection[1]) and image_missing)
+            needs_confirm = not has_plan or (self.has_gateway(task, 'image') and image_missing)
             if needs_confirm and not force:
                 return {'needs_confirm': True, 'message': '恢复需要重新规划或请求缺失图片；结果未知的请求可能重复计费，是否继续？'}
             if has_plan:
                 needed = sum(s['img_state'] not in ('ready', 'placeholder') or not s['image_path'] or
                              not (self.config.data / str(tid) / s['image_path']).is_file() for s in scenes)
+                if needed:
+                    self.task_config(task, ('image',))
                 self.image_budget(task, needed)
+            else:
+                self.task_config(task, ('llm',))
             operation = self.claim(conn, tid, 'resume' if has_plan else 'plan', 'generating')
         work = (lambda: self.generate_missing(tid, operation, recover_video=True, retry_images_confirmed=force)) if has_plan else (lambda: self.plan(tid, operation, task['script']))
         self.dispatch(tid, operation, work)
@@ -430,7 +460,9 @@ class Tasks:
             scenes = self.scenes(conn, tid)
         task.pop('script_hash', None)
         task['busy'] = bool(task['operation_id'])
-        task['configured'] = bool(self.task_config(task).image_connection[1])
+        available = self.models.availability(task.get('model_config', ''))
+        task['configured'] = self.has_gateway(task, 'image') and available['image']
+        task['model_available'] = available
         task['config_revision'] = script_digest(task.pop('model_config'))[:12]
         task.pop('owner', None)
         task['image_request_limit'] = self.config.max_image_requests
