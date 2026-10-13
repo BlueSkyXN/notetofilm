@@ -59,7 +59,7 @@ class Store:
     def migrate(self):
         with self.connect(write=True) as conn:
             version = conn.execute('PRAGMA user_version').fetchone()[0]
-            if version > 4:
+            if version > 9:
                 raise RuntimeError('数据库版本高于当前程序，请勿降级启动')
             conn.execute('CREATE TABLE IF NOT EXISTS tasks ('
                          'id INTEGER PRIMARY KEY AUTOINCREMENT, script TEXT NOT NULL, '
@@ -77,6 +77,18 @@ class Store:
                     'plan_revision': 'INTEGER NOT NULL DEFAULT 1',
                     'image_requests': 'INTEGER NOT NULL DEFAULT 0', 'archived': 'INTEGER NOT NULL DEFAULT 0',
                     'owner': "TEXT NOT NULL DEFAULT 'admin'", 'model_config': "TEXT NOT NULL DEFAULT ''",
+                    'material_revision_floor': 'INTEGER NOT NULL DEFAULT 0',
+                    'aspect_ratio': "TEXT NOT NULL DEFAULT '16:9'",
+                    'image_fit': "TEXT NOT NULL DEFAULT 'contain'",
+                    'purpose': "TEXT NOT NULL DEFAULT ''",
+                    'audience': "TEXT NOT NULL DEFAULT ''",
+                    'focus': "TEXT NOT NULL DEFAULT ''",
+                    'target_duration_seconds': 'INTEGER NOT NULL DEFAULT 0',
+                    'pause_requested': 'INTEGER NOT NULL DEFAULT 0',
+                    'title': "TEXT NOT NULL DEFAULT ''",
+                    'copied_from': 'INTEGER',
+                    'operation_started_at': 'TEXT', 'progress_stage': 'TEXT',
+                    'progress_scene': 'INTEGER', 'progress_started_at': 'TEXT',
                 },
                 'scenes': {
                     'img_placeholder': 'INTEGER NOT NULL DEFAULT 0',
@@ -84,6 +96,10 @@ class Store:
                     'img_revision': 'INTEGER NOT NULL DEFAULT 0', 'aud_revision': 'INTEGER NOT NULL DEFAULT 0',
                     'img_approved': 'INTEGER NOT NULL DEFAULT 0', 'aud_approved': 'INTEGER NOT NULL DEFAULT 0',
                     'image_path': 'TEXT', 'audio_path': 'TEXT', 'img_error': 'TEXT', 'aud_error': 'TEXT',
+                    'audio_duration_seconds': 'REAL',
+                    'visual_prompt': "TEXT NOT NULL DEFAULT ''",
+                    'image_width': 'INTEGER', 'image_height': 'INTEGER',
+                    'image_spec_json': 'TEXT', 'image_asset_id': 'INTEGER',
                 },
             }
             for table, additions in fields.items():
@@ -109,7 +125,19 @@ class Store:
                          'owner TEXT NOT NULL, request_key TEXT NOT NULL, parameter_hash TEXT NOT NULL, '
                          'task_id INTEGER NOT NULL REFERENCES tasks(id), operation_id TEXT NOT NULL, '
                          'created_at TEXT NOT NULL, PRIMARY KEY(owner,request_key))')
-            conn.execute('PRAGMA user_version=4')
+            conn.execute('CREATE TABLE IF NOT EXISTS video_versions ('
+                         'id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES tasks(id), '
+                         'video_path TEXT NOT NULL, label TEXT NOT NULL, created_at TEXT NOT NULL)')
+            conn.execute('CREATE TABLE IF NOT EXISTS image_assets ('
+                         'id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES tasks(id), '
+                         "source TEXT NOT NULL CHECK(source IN ('upload','generated')), "
+                         'path TEXT NOT NULL, sha256 TEXT NOT NULL, mime TEXT NOT NULL, '
+                         'width INTEGER NOT NULL, height INTEGER NOT NULL, byte_size INTEGER NOT NULL, '
+                         'origin_scene_id INTEGER, context_json TEXT NOT NULL DEFAULT \'{}\', created_at TEXT NOT NULL)')
+            conn.execute('CREATE INDEX IF NOT EXISTS image_asset_task ON image_assets(task_id,id)')
+            if version < 6:
+                conn.execute("UPDATE scenes SET visual_prompt=narration WHERE visual_prompt=''")
+            conn.execute('PRAGMA user_version=9')
 
     def recover(self):
         with self.connect(write=True) as conn:
@@ -121,3 +149,4 @@ class Store:
                          "OR status IN ('submitted','generating','rendering')",
                          ('服务中断，已有成功素材保留，请核对后恢复。',))
             conn.execute('UPDATE tasks SET operation_id=NULL,operation_kind=NULL,operation_scene=NULL')
+            conn.execute('UPDATE tasks SET operation_started_at=NULL,progress_stage=NULL,progress_scene=NULL,progress_started_at=NULL')

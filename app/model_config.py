@@ -12,9 +12,9 @@ from fastapi import HTTPException
 from .gateway import validate_gateway
 
 SCHEMA = {
-    'llm': {'base_url': str, 'model': str, 'api_key_env': str},
+    'llm': {'base_url': str, 'model': str, 'api_key_env': str, 'wire_api': str},
     'image': {'base_url': str, 'model': str, 'api_key_env': str, 'size': str,
-              'quality': str, 'timeout_seconds': int, 'style': str},
+              'quality': str, 'timeout_seconds': int, 'style': str, 'reference_protocol': str},
     'tts': {'provider': str, 'voice': str},
 }
 SECRET_NAMES = {'OPENAI_API_KEY', 'LLM_API_KEY', 'IMAGE_API_KEY'}
@@ -25,7 +25,7 @@ def encode(document):
     for section, fields in SCHEMA.items():
         lines = [f'[{section}]']
         for name in fields:
-            value = document[section][name]
+            value = document[section].get(name, 'chat') if section == 'llm' and name == 'wire_api' else document[section][name]
             lines.append(f'{name} = {json.dumps(value, ensure_ascii=False)}')
         blocks.append('\n'.join(lines))
     return '\n\n'.join(blocks) + '\n'
@@ -50,11 +50,11 @@ class ModelConfig:
         c = self.settings
         return {
             'llm': {'base_url': c.llm_connection[0], 'model': c.llm_model,
-                    'api_key_env': 'LLM_API_KEY' if c.llm_base else 'OPENAI_API_KEY'},
+                    'api_key_env': 'LLM_API_KEY' if c.llm_base else 'OPENAI_API_KEY', 'wire_api': c.llm_wire_api},
             'image': {'base_url': c.image_connection[0], 'model': c.image_model,
                       'api_key_env': 'IMAGE_API_KEY' if c.image_base else 'OPENAI_API_KEY',
                       'size': c.image_size, 'quality': c.image_quality, 'timeout_seconds': c.image_timeout,
-                      'style': c.style},
+                      'style': c.style, 'reference_protocol': c.image_reference_protocol},
             'tts': {'provider': 'edge-tts', 'voice': c.voice},
         }
 
@@ -71,6 +71,11 @@ class ModelConfig:
             raise ValueError('TOML 语法无效，请检查引号、字段名及分节') from None
         if set(document) != set(SCHEMA):
             raise ValueError('配置只允许 llm、image、tts 三个分节，且必须完整')
+        # Existing TOML and task snapshots used Chat Completions implicitly.
+        if isinstance(document['llm'], dict):
+            document['llm'].setdefault('wire_api', 'chat')
+        if isinstance(document.get('image'), dict):
+            document['image'].setdefault('reference_protocol', 'none')
         for section, fields in SCHEMA.items():
             values = document[section]
             if not isinstance(values, dict) or set(values) != set(fields):
@@ -90,10 +95,14 @@ class ModelConfig:
             if not values['model'].strip() or len(values['model']) > 200:
                 raise ValueError(f'{section}.model 无效')
         image = document['image']
+        if document['llm']['wire_api'] not in ('chat', 'responses'):
+            raise ValueError('llm.wire_api 必须为 chat 或 responses')
         if not re.fullmatch(r'\d{2,4}x\d{2,4}|auto', image['size']):
             raise ValueError('image.size 应为 1024x768 等尺寸或 auto')
         if image['quality'] not in ('low', 'medium', 'high', 'auto') or not 1 <= image['timeout_seconds'] <= 600:
             raise ValueError('图片质量或超时设置无效')
+        if image['reference_protocol'] not in ('none', 'openai-images-edit'):
+            raise ValueError('image.reference_protocol 必须为 none 或 openai-images-edit')
         if document['tts']['provider'] != 'edge-tts' or not re.fullmatch(r'[A-Za-z0-9-]{3,100}', document['tts']['voice']):
             raise ValueError('TTS 仅支持 edge-tts，音色名称无效')
         return document
@@ -106,10 +115,11 @@ class ModelConfig:
                 raise ValueError(f'{name} 引用的密钥尚未配置，请联系管理员恢复对应模型配置')
         return replace(self.settings, base='', key='',
                        llm_base=llm['base_url'].rstrip('/'), llm_key=self.secret_values[llm['api_key_env']] if llm['base_url'] else '',
-                       llm_model=llm['model'], image_base=image['base_url'].rstrip('/'),
+                       llm_model=llm['model'], llm_wire_api=llm['wire_api'], image_base=image['base_url'].rstrip('/'),
                        image_key=self.secret_values[image['api_key_env']] if image['base_url'] else '',
                        image_model=image['model'], image_size=image['size'], image_quality=image['quality'],
-                       image_timeout=image['timeout_seconds'], style=image['style'], voice=tts['voice'])
+                       image_timeout=image['timeout_seconds'], style=image['style'],
+                       image_reference_protocol=image['reference_protocol'], voice=tts['voice'])
 
     def document_for(self, text=''):
         with self.lock:
@@ -159,7 +169,7 @@ class ModelConfig:
 
     def info(self):
         with self.lock:
-            return {'text': self.active_text, 'revision': revision(self.active_text),
+            return {'text': self.active_text, 'document': self.parse(self.active_text), 'revision': revision(self.active_text),
                     'secrets': {name: bool(value) for name, value in self.secret_values.items()},
                     'has_previous': self.previous.is_file(), 'ephemeral': bool(self.settings.space_host),
                     'storage': 'data/config.toml', 'external_change': self.path.read_text() != self.active_text}

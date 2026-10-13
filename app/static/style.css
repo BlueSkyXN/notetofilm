@@ -9,3 +9,25 @@
 @media(max-width:1000px){.studio{grid-template-columns:1fr}.task-list{max-height:none}.task-toolbar{align-items:flex-start;flex-direction:column}.task-toolbar .actions{width:100%}.panel-foot p{max-width:none}}
 @media(max-width:640px){.main{padding:24px 16px 36px}.topbar-inner{padding:10px 16px;gap:10px;flex-wrap:wrap}.brand-sub{display:none}.topbar nav{gap:4px}.topbar nav>a:not(.button){padding:8px 5px;font-size:12px}h1{font-size:24px}.page-header{align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:18px}.steps{gap:12px;margin-bottom:20px}.steps li{gap:5px;font-size:11px}.steps li>span{width:21px;height:21px}.card,.panel{padding:18px}.panel-title{gap:10px;flex-wrap:wrap}.panel-foot{flex-direction:column;align-items:stretch;gap:12px}.panel-foot button{width:100%}.studio{gap:20px}.task-toolbar{padding:16px;gap:12px}.task-toolbar .actions button{flex:1 1 auto;min-height:44px}.scene{padding:16px}.plan-row{padding:12px}.plan-row .panel-title{flex-wrap:nowrap}.finished .button{width:100%}.login{margin-top:4vh}.login .card{padding:22px}.config-editor{min-height:380px}.task-bottom{font-size:11px}.badge{white-space:normal}.task-meta .badge{white-space:nowrap}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+
+.inline-confirm{flex:1 1 100%;margin:12px 0}.inline-confirm>p{margin:0}.inline-confirm .actions{margin-top:10px}
+.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.form-grid input,.form-grid select{width:100%}.layout-controls{margin:18px 0 10px}.scene-inputs textarea{min-height:150px}.plan-row>.panel-title{justify-content:flex-end;margin-bottom:4px}.visual-details{font-size:12px;color:var(--secondary)}.visual-prompt{white-space:pre-wrap;overflow-wrap:anywhere}.scene .image-frame{display:block;overflow:hidden;background:#fff;border:1px solid var(--border3);border-radius:8px}.scene .image-frame img{width:100%;height:100%;border-radius:0;object-position:center}.image-size{margin-top:-4px}.finished video.portrait{width:min(100%,315px);max-height:560px;margin:auto}.progress-card .panel-title{margin-bottom:10px}.progress-card progress{width:100%;height:8px;display:block;accent-color:var(--primary)}.progress-card p{margin-bottom:0}.config-form{margin:18px 0}.config-form .wide{grid-column:1/-1}.config-form textarea{min-height:90px}.advanced-config{margin:20px 0}.advanced-config[open] summary{margin-bottom:14px}.field-help{margin:4px 0 0}
+@media(max-width:640px){.form-grid{grid-template-columns:1fr}.scene-inputs textarea{min-height:104px}.outline li{grid-template-columns:1fr}}
+.brief-toggle{margin:0 0 14px}.brief-fields{margin-bottom:14px}.brief-fields .wide{grid-column:1/-1}
+.duration-edit{max-width:220px;margin:8px 0 4px}.duration-edit input{width:100%}
+.image-library{margin:18px 0;padding:16px;background:var(--elevated);border:1px solid var(--border3);border-radius:var(--radius)}
+.image-library .panel-title{align-items:baseline;margin-bottom:10px}
+.image-library .panel-title h3{margin:0}
+.field-label{font-weight:550}
+.asset-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin-top:12px}
+.asset-item{display:flex;flex-direction:column;gap:6px;min-width:0}
+.asset-item img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:6px;background:#fff}
+.asset-item span{font-size:11px;color:var(--secondary);overflow-wrap:anywhere}
+.title-edit{max-width:420px;margin-top:12px}.title-edit input{width:100%}
+.version-list{display:flex;flex-direction:column;gap:8px}.version-list a{font-size:13px}
+.scene-edit{margin-top:4px}.scene-edit textarea{min-height:72px;background:var(--container)}
+.draft-frame img{width:min(100%,640px);border-radius:8px;display:block;background:#fff}
+#draft-audio{width:min(100%,640px);margin-top:10px}
+.outline{list-style:none;padding:0;margin:12px 0;display:flex;flex-direction:column}
+.outline li{display:grid;grid-template-columns:4.5rem 9.5rem minmax(0,1fr);gap:10px;align-items:baseline;padding:8px 0;border-top:1px solid var(--border3);font-size:13px}
+.outline .meta{color:var(--secondary);font-size:12px}

@@ -1,6 +1,7 @@
 import json
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 import time
 import unittest
@@ -12,6 +13,7 @@ from app.config import Config
 from app.db import Store
 from app.providers import Providers
 from app.render import Renderer, run_process, validate_asset
+from app.layout import video_layout
 
 
 class ConfigTests(unittest.TestCase):
@@ -42,9 +44,13 @@ class ConfigTests(unittest.TestCase):
         Config.from_env({'ALLOW_UNAUTHENTICATED_LOCAL': '1'}).validate()
 
     def test_key_only_allowed_for_toml_config(self):
-        Config.from_env({'ACCESS_TOKEN': 'test', 'OPENAI_API_KEY': 'test'}).validate()
-        with self.assertRaises(ValueError):
-            Config.from_env({'ACCESS_TOKEN': 'test', 'OPENAI_BASE': 'https://gateway.example/v1'}).validate()
+        with tempfile.TemporaryDirectory() as folder:
+            env = {'VIDEO_DATA_DIR': folder, 'ACCESS_TOKEN': 'test'}
+            Config.from_env({**env, 'OPENAI_API_KEY': 'test'}).validate()
+            with self.assertRaises(ValueError):
+                Config.from_env({**env, 'OPENAI_BASE': 'https://gateway.example/v1'}).validate()
+            (Path(folder) / 'config.toml').write_text('')
+            Config.from_env({**env, 'OPENAI_BASE': 'https://gateway.example/v1'}).validate()
 
     def test_zero_capacity_rejected(self):
         with self.assertRaises(ValueError):
@@ -65,7 +71,8 @@ class ConfigTests(unittest.TestCase):
             store.open()
             try:
                 with store.connect() as conn:
-                    self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 4)
+                    self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 9)
+                    self.assertEqual(conn.execute('SELECT purpose,audience,focus,target_duration_seconds FROM tasks').fetchone()[:], ('', '', '', 0))
                     self.assertEqual(conn.execute('SELECT COUNT(*) FROM image_requests').fetchone()[0], 0)
                     self.assertEqual(conn.execute('SELECT script,status,video_path FROM tasks').fetchone()[:], ('keep', 'done', 'video.mp4'))
                     self.assertEqual(conn.execute('SELECT narration FROM scenes').fetchone()[0], 'keep scene')
@@ -111,6 +118,35 @@ class ConfigTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg and ffprobe required')
 class RenderTests(unittest.TestCase):
+    def test_multiscene_portrait_fit_pixels_and_layout_recovery(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            run_process(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi', '-i',
+                         'color=c=red:s=640x360,drawbox=x=160:y=0:w=320:h=360:color=blue:t=fill',
+                         '-frames:v', '1', str(root / 'wide.png')], 30)
+            run_process(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi', '-i',
+                         'sine=duration=0.7', str(root / 'audio.mp3')], 30)
+            scenes = [{'idx': idx, 'narration': f'镜 {idx}', 'img_revision': 1, 'aud_revision': 1,
+                       'image_path': 'wide.png', 'audio_path': 'audio.mp3'} for idx in range(3)]
+            renderer = Renderer(Config(data=root))
+            for fit in ('contain', 'cover'):
+                with self.subTest(fit=fit):
+                    layout = video_layout('9:16', fit)
+                    output = renderer.render(root, fit, scenes, layout)
+                    report = json.loads((root / output).with_suffix('.build.json').read_text())
+                    self.assertEqual((report['width'], report['height'], report['scene_count']), (1080, 1920, 3))
+                    self.assertEqual(report['technical_validation'], 'passed')
+                    pixel = subprocess.check_output(['ffmpeg', '-nostdin', '-v', 'error', '-i', str(root / output),
+                                                     '-vf', 'format=rgb24,crop=1:1:10:10', '-frames:v', '1', '-f', 'rawvideo', '-'])
+                    if fit == 'contain':
+                        self.assertTrue(all(channel > 235 for channel in pixel), pixel)
+                    else:
+                        self.assertTrue(pixel[2] > 200 and pixel[0] < 35 and pixel[1] < 35, pixel)
+                    self.assertEqual(renderer.recover(root, scenes, layout), output)
+                    self.assertIsNone(renderer.recover(root, scenes, video_layout()))
+            self.assertNotEqual(renderer.recover(root, scenes, video_layout('9:16', 'cover')),
+                                renderer.recover(root, scenes, video_layout('9:16', 'contain')))
+
     def test_service_end_to_end_without_external_calls(self):
         from app.tasks import Tasks
         from test_tasks import ManualExecutor, FakeProviders

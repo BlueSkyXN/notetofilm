@@ -29,7 +29,9 @@ class Config:
     base: str = ''
     key: str = ''
     llm_model: str = 'origin-deepseek-v4-1-flash'
+    llm_wire_api: str = 'chat'
     image_model: str = 'gpt-image-2.5-sunburst'
+    image_reference_protocol: str = 'none'
     image_size: str = '1024x768'
     image_timeout: int = 300
     voice: str = 'zh-CN-YunxiNeural'
@@ -59,6 +61,8 @@ class Config:
     max_daily_audio: int = 120
     max_daily_renders: int = 30
     request_body_timeout: int = 30
+    max_upload_image_bytes: int = 10 * 1024 * 1024
+    max_image_pixels: int = 24_000_000
 
     @property
     def llm_connection(self):
@@ -82,7 +86,9 @@ class Config:
             cookie_secure=bool(space_host) or value(env, 'COOKIE_SECURE') == '1',
             base=value(env, 'OPENAI_BASE').rstrip('/'), key=value(env, 'OPENAI_API_KEY'),
             llm_model=value(env, 'LLM_MODEL', 'origin-deepseek-v4-1-flash'),
+            llm_wire_api=value(env, 'LLM_WIRE_API', 'chat'),
             image_model=value(env, 'IMAGE_MODEL', 'gpt-image-2.5-sunburst'),
+            image_reference_protocol=value(env, 'IMAGE_REFERENCE_PROTOCOL', 'none'),
             image_size=value(env, 'IMAGE_SIZE', '1024x768'),
             image_timeout=positive(env, 'IMAGE_TIMEOUT', 300),
             voice=value(env, 'TTS_VOICE', 'zh-CN-YunxiNeural'),
@@ -107,9 +113,15 @@ class Config:
             max_daily_audio=positive(env, 'MAX_DAILY_AUDIO_REQUESTS', 120),
             max_daily_renders=positive(env, 'MAX_DAILY_RENDER_REQUESTS', 30),
             request_body_timeout=positive(env, 'REQUEST_BODY_TIMEOUT', 30),
+            max_upload_image_bytes=positive(env, 'MAX_UPLOAD_IMAGE_BYTES', 10 * 1024 * 1024),
+            max_image_pixels=positive(env, 'MAX_IMAGE_PIXELS', 24_000_000),
         )
 
     def validate(self):
+        if self.llm_wire_api not in ('chat', 'responses'):
+            raise ValueError('LLM_WIRE_API 必须为 chat 或 responses')
+        if self.image_reference_protocol not in ('none', 'openai-images-edit'):
+            raise ValueError('IMAGE_REFERENCE_PROTOCOL 必须为 none 或 openai-images-edit')
         if self.space_host:
             if not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.hf\.space', self.space_host):
                 raise ValueError('SPACE_HOST 必须是明确的 HF Space 主机名')
@@ -127,7 +139,8 @@ class Config:
             raise ValueError('并发配置必须满足 1 <= MAX_RENDER_TASKS <= MAX_ACTIVE_TASKS')
         if self.request_body_timeout <= 0 or self.max_script < 1:
             raise ValueError('请求体读取超时和文稿限额必须为正数')
-        if min(self.max_image_requests, self.min_free_mb, self.max_audio_seconds, self.max_video_seconds) < 1:
-            raise ValueError('费用、磁盘和媒体时长限制必须是正数')
+        if min(self.max_image_requests, self.min_free_mb, self.max_audio_seconds, self.max_video_seconds,
+               self.max_upload_image_bytes, self.max_image_pixels) < 1:
+            raise ValueError('费用、磁盘、媒体和上传限制必须是正数')
         if self.webhook and urlsplit(self.webhook).scheme != 'https':
             raise ValueError('FEISHU_WEBHOOK 必须使用 HTTPS')

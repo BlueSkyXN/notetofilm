@@ -32,15 +32,19 @@ class FakeProviders:
     def __init__(self):
         self.plan_result = ['first', 'second', 'third']
         self.images = []
+        self.image_references = []
         self.audios = []
         self.fail_audio = None
         self.fail_image = None
+        self.briefs = []
 
-    def plan(self, script):
+    def plan(self, script, brief=None):
+        self.briefs.append(brief)
         return self.plan_result
 
-    def image(self, narration, output):
+    def image(self, narration, output, references=None):
         self.images.append(narration)
+        self.image_references.append(references or [])
         if narration == self.fail_image:
             raise TimeoutError('fixture')
         output.write_bytes(b'image fixture')
@@ -59,11 +63,11 @@ class FakeRenderer:
     def __init__(self):
         self.calls = []
 
-    def render(self, task_dir, operation, scenes):
+    def render(self, task_dir, operation, scenes, layout=None):
         self.calls.append((operation, scenes))
         return f'renders/{operation}/video.mp4'
 
-    def recover(self, task_dir, scenes):
+    def recover(self, task_dir, scenes, layout=None):
         return None
 
 
@@ -346,6 +350,102 @@ class TaskTests(unittest.TestCase):
         self.service.generate(tid, True, task['plan_revision'])
         self.executor.run()
         self.assertEqual(self.providers.images, ['new plan'])
+
+    def test_same_script_with_different_purpose_keeps_separate_budgets(self):
+        brief = {'purpose': '向同事说明做法', 'audience': '同事', 'focus': '先讲结果', 'target_duration_seconds': 60}
+        other = {'purpose': '向新同学介绍背景', 'audience': '新同学', 'focus': '先讲来龙去脉', 'target_duration_seconds': 180}
+        first = self.service.submit('同一份材料', purpose=brief['purpose'], audience=brief['audience'], focus=brief['focus'], target_duration_seconds=60)['task_id']
+        self.executor.run()
+        second = self.service.submit('同一份材料', purpose=other['purpose'], audience=other['audience'], focus=other['focus'], target_duration_seconds=180)['task_id']
+        self.executor.run()
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.providers.briefs, [brief, other])
+        detail = self.service.detail(second)
+        self.assertEqual(detail['narration_budget_chars'], 720)
+        self.assertEqual(detail['narration_chars'], len('firstsecondthird'))
+        self.assertEqual((detail['purpose'], detail['target_duration_seconds']), ('向新同学介绍背景', 180))
+        self.assertIsNone(self.service.detail(self.planned())['narration_budget_chars'])
+        self.raises_status(409, self.service.submit, '同一份材料', 'admin', '16:9', 'contain', other['purpose'], other['audience'], other['focus'], 180)
+        self.raises_status(422, self.service.submit, '同一份材料', 'admin', '16:9', 'contain', brief['purpose'], '', '', 60)
+
+    def test_title_revision_keeps_old_film_and_copy_starts_a_new_episode(self):
+        named = self.service.submit('命名文稿', title='十月周报')['task_id']
+        self.executor.run()
+        self.assertEqual(self.service.detail(named)['title'], '十月周报')
+        self.assertEqual(self.service.listing()['tasks'][0]['title'], '十月周报')
+        tid = self.review()
+        self.approve(tid)
+        self.service.render(tid)
+        self.executor.run()
+        detail = self.service.detail(tid)
+        self.assertEqual(detail['status'], 'done')
+        old = detail['video_path']
+        film = self.config.data / str(tid) / old
+        film.parent.mkdir(parents=True, exist_ok=True)
+        film.write_bytes(b'old-film')
+        self.service.revise(tid)
+        revised = self.service.detail(tid)
+        self.assertEqual(revised['status'], 'review')
+        self.assertIsNone(revised['video_path'])
+        self.assertEqual(revised['versions'][0]['video'], f'/api/v1/tasks/{tid}/files/{old}')
+        self.assertEqual(film.read_bytes(), b'old-film')
+        self.assertEqual(self.service.allowed_file(tid, old).read_bytes(), b'old-film')
+        copied = self.service.copy_next(tid)
+        episode = self.service.detail(copied['task_id'])
+        self.assertEqual(episode['status'], 'planned')
+        self.assertEqual(episode['copied_from'], tid)
+        self.assertEqual([scene['narration'] for scene in episode['scenes']], ['first', 'second', 'third'])
+        self.assertTrue(all(scene['image'] is None and scene['audio'] is None for scene in episode['scenes']))
+        self.assertIn('下一期', episode['title'])
+        self.raises_status(409, self.service.submit, 'fixture')
+
+    def test_preview_stops_after_the_first_scene_until_generation_continues(self):
+        tid = self.planned()
+        revision = self.service.detail(tid)['plan_revision']
+        self.service.generate(tid, True, revision, True)
+        self.executor.run()
+        detail = self.service.detail(tid)
+        self.assertEqual(detail['status'], 'planned')
+        self.assertEqual(self.providers.images, ['first'])
+        self.assertEqual(self.providers.audios, ['first'])
+        self.service.generate(tid, True, detail['plan_revision'], False)
+        self.executor.run()
+        self.assertEqual(self.service.detail(tid)['status'], 'review')
+        self.assertEqual(self.providers.images, ['first', 'second', 'third'])
+
+    def test_pause_keeps_the_finished_request_and_skips_the_rest(self):
+        tid = self.planned()
+        original = self.providers.image
+        def image(narration, output):
+            original(narration, output)
+            with self.service.store.connect(write=True) as conn:
+                conn.execute('UPDATE tasks SET pause_requested=1 WHERE id=?', (tid,))
+        self.providers.image = image
+        self.service.generate(tid, True, self.service.detail(tid)['plan_revision'])
+        self.executor.run()
+        detail = self.service.detail(tid)
+        self.assertEqual(detail['status'], 'interrupted')
+        self.assertIn('暂停', detail['error'])
+        self.assertEqual(detail['pause_requested'], 0)
+        self.assertEqual(self.providers.images, ['first'])
+        self.assertEqual(self.providers.audios, [])
+        self.raises_status(409, self.service.request_pause, tid)
+
+    def test_over_budget_generation_waits_until_target_is_raised(self):
+        self.providers.plan_result = ['字' * 80]
+        tid = self.service.submit('预算材料', purpose='说明做法', audience='同事', focus='结果', target_duration_seconds=15)['task_id']
+        self.executor.run()
+        detail = self.service.detail(tid)
+        self.assertEqual(detail['narration_budget_chars'], 60)
+        self.raises_status(409, self.service.generate, tid, True, detail['plan_revision'])
+        scene = detail['scenes'][0]
+        self.service.save_plan(tid, [{'id': scene['id'], 'narration': scene['narration'], 'visual_prompt': scene['visual_prompt']}],
+                               detail['plan_revision'], target_duration_seconds=30)
+        updated = self.service.detail(tid)
+        self.assertEqual((updated['target_duration_seconds'], updated['narration_budget_chars']), (30, 120))
+        self.service.generate(tid, True, updated['plan_revision'])
+        self.executor.run()
+        self.assertEqual(self.service.detail(tid)['status'], 'review')
 
     def test_archive_releases_duplicate_without_deleting(self):
         tid = self.review()

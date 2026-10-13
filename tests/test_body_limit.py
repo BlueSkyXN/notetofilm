@@ -27,11 +27,12 @@ class BodyLimitTests(unittest.IsolatedAsyncioTestCase):
         await self.lifespan.__aexit__(None, None, None)
         self.temp.cleanup()
 
-    async def call(self, body=b'', extra=(), route='/api/v1/tasks', delay=0, disconnect=False):
+    async def call(self, body=b'', extra=(), route='/api/v1/tasks', delay=0, disconnect=False, method='POST',
+                   content_type='application/json'):
         cookie = new_visitor(self.settings.token)
-        scope = {'type': 'http', 'asgi': {'version': '3.0'}, 'http_version': '1.1', 'method': 'POST',
+        scope = {'type': 'http', 'asgi': {'version': '3.0'}, 'http_version': '1.1', 'method': method,
                  'scheme': 'http', 'path': route, 'raw_path': route.encode(), 'query_string': b'',
-                 'root_path': '', 'headers': [(b'host', b'localhost'), (b'content-type', b'application/json'),
+                 'root_path': '', 'headers': [(b'host', b'localhost'), (b'content-type', content_type.encode()),
                  (b'cookie', ('ntf_visitor=' + cookie).encode()), *extra],
                  'client': ('127.0.0.1', 10000), 'server': ('localhost', 80)}
         offset = 0
@@ -120,6 +121,41 @@ class BodyLimitTests(unittest.IsolatedAsyncioTestCase):
         status, _, _ = await self.call(b'{"token":"wrong"}' + b' ' * self.limit, route='/api/v1/auth/login')
         self.assertEqual(status, 413)
         self.assert_no_business_effects()
+
+    async def test_plan_allows_bounded_visual_prompts_beyond_script_body_limit(self):
+        tid = self.service.submit('large structured plan')['task_id']
+        self.executor.run()
+        revision = self.service.detail(tid)['plan_revision']
+        plan = {'revision': revision, 'scenes': [{'narration': '短旁白', 'visual_prompt': '画' * 4000} for _ in range(30)]}
+        body = json.dumps(plan).encode()
+        self.assertGreater(len(body), self.limit)
+        route = f'/api/v1/tasks/{tid}/plan'
+        auth = ((b'x-access-token', b'body-test-admin'),)
+        status, _, _ = await self.call(body, auth, route=route, method='PUT')
+        self.assertEqual(status, 200)
+        self.assertEqual(self.service.detail(tid)['expected_scenes'], 30)
+        limit = self.limit + 30 * 4000 * 6
+        status, _, _ = await self.call(body + b' ' * limit, auth, route=route, method='PUT')
+        self.assertEqual(status, 413)
+
+    async def test_image_upload_uses_image_body_limit_and_content_type(self):
+        tid = self.service.submit('upload boundary')['task_id']
+        self.executor.run()
+        route = f'/api/v1/tasks/{tid}/images'
+        auth = ((b'x-access-token', b'body-test-admin'),)
+        original = self.app.state.config
+        self.app.state.config = replace(original, max_upload_image_bytes=16)
+        try:
+            status, _, result = await self.call(b'x', auth, route=route, content_type='application/json')
+            self.assertEqual(status, 400)
+            status, _, result = await self.call(b'x' * 17, auth, route=route, content_type='image/png')
+            self.assertEqual(status, 413)
+            status, _, result = await self.call(b'x', auth, route=route, content_type='image/png')
+            self.assertEqual(status, 422)
+            with self.service.store.connect() as conn:
+                self.assertEqual(conn.execute('SELECT COUNT(*) FROM image_assets').fetchone()[0], 0)
+        finally:
+            self.app.state.config = original
 
 
 if __name__ == '__main__':

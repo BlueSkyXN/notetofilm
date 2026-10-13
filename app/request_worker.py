@@ -4,6 +4,7 @@ import base64
 import ipaddress
 import json
 import socket
+import ssl
 import sys
 import urllib.request
 from urllib.parse import urlsplit
@@ -12,9 +13,13 @@ from contextlib import contextmanager, nullcontext
 LIMIT = 32 * 1024 * 1024
 
 
+class RedirectDenied(ValueError):
+    pass
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise ValueError('Upstream redirects are not supported')
+        raise RedirectDenied('Upstream redirects are not supported')
 
 
 def public_download(url):
@@ -42,6 +47,12 @@ def pinned_download(url):
         socket.getaddrinfo = original
 
 
+def failure(kind, status=None):
+    # Never serialize upstream bodies, reason strings, URLs or headers.
+    sys.stderr.write(json.dumps({'kind': kind, 'status': status}))
+    return 1
+
+
 def main():
     try:
         options = json.load(sys.stdin)
@@ -55,13 +66,20 @@ def main():
             with urllib.request.build_opener(*handlers).open(req, timeout=options['timeout']) as response:
                 raw = response.read(LIMIT + 1)
         if len(raw) > LIMIT:
-            raise ValueError('Response exceeds limit')
+            return failure('response_limit')
         sys.stdout.write(base64.b64encode(raw).decode())
         return 0
+    except urllib.error.HTTPError as exc:
+        return failure('http', exc.code)
+    except RedirectDenied:
+        return failure('redirect')
+    except (TimeoutError, socket.timeout):
+        return failure('timeout')
+    except urllib.error.URLError as exc:
+        return failure('tls' if isinstance(exc.reason, ssl.SSLError) else
+                       'timeout' if isinstance(exc.reason, TimeoutError) else 'connection')
     except Exception:
-        # Upstream error bodies and URLs may contain credentials or customer content.
-        sys.stderr.write('upstream request failed')
-        return 1
+        return failure('failed')
 
 
 if __name__ == '__main__':

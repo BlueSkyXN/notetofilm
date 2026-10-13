@@ -103,6 +103,14 @@ class HttpTests(unittest.TestCase):
         cookie = next(c for c in headers.get_all('Set-Cookie') if c.startswith('ntf_visitor='))
         return {'Cookie': cookie.split(';')[0]}
 
+    def raw(self, path, body, headers, method='POST'):
+        request = urllib.request.Request(self.base + path, data=body, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status, response.headers, response.read()
+        except urllib.error.HTTPError as error:
+            return error.code, error.headers, error.read()
+
     def test_visitors_cannot_read_or_mutate_other_tasks(self):
         alice, bob = self.visitor(), self.visitor()
         status, _, body = self.call('/api/v1/tasks', {'script': 'private visitor script'}, alice)
@@ -166,7 +174,10 @@ class HttpTests(unittest.TestCase):
         info = json.loads(raw)
         self.assertNotIn(b'http-test-only', raw)
         body = {'text': info['text'].replace('origin-deepseek-v4-1-flash', 'updated-offline-model'), 'revision': info['revision']}
-        self.assertEqual(self.call('/api/v1/admin/config/validate', body, h)[0], 200)
+        code, _, validation = self.call('/api/v1/admin/config/validate', body, h)
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(validation)['document']['llm']['model'], 'updated-offline-model')
+        self.assertEqual(info['document']['llm']['wire_api'], 'chat')
         code, _, raw = self.call('/api/v1/admin/config', body, h, 'PUT')
         self.assertEqual(code, 200)
         saved = json.loads(raw)
@@ -174,6 +185,89 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.call('/api/v1/admin/config/restore', {'revision': saved['revision']}, h)[0], 200)
         body['text'] = '[broken'
         self.assertEqual(self.call('/api/v1/admin/config/validate', body, h)[0], 422)
+
+    def test_structured_plan_layout_and_public_progress(self):
+        guest = self.visitor()
+        self.assertEqual(self.call('/api/v1/tasks', {'script': 'invalid layout', 'aspect_ratio': '1:1'}, guest)[0], 422)
+        code, _, raw = self.call('/api/v1/tasks', {'script': '可独立编辑的分镜', 'aspect_ratio': '9:16', 'image_fit': 'cover'}, guest)
+        self.assertEqual(code, 202)
+        url = json.loads(raw)['status_url']
+        for _ in range(50):
+            task = json.loads(self.call(url, headers=guest)[2])
+            if task['status'] == 'planned':
+                break
+            time.sleep(.02)
+        self.assertEqual(task['status'], 'planned')
+        self.assertEqual((task['aspect_ratio'], task['image_fit']), ('9:16', 'cover'))
+        self.assertEqual(task['progress']['total'], 1)
+        scene = task['scenes'][0]
+        plan = {'revision': task['plan_revision'], 'scenes': [{'id': scene['id'], 'narration': '新的旁白', 'visual_prompt': '清晨窗边的一盆绿植'}], 'image_fit': 'contain'}
+        self.assertEqual(self.call(url + '/plan', plan, guest, 'PUT')[0], 200)
+        after = json.loads(self.call(url, headers=guest)[2])
+        self.assertEqual(after['scenes'][0]['id'], scene['id'])
+        self.assertEqual(after['scenes'][0]['visual_prompt'], '清晨窗边的一盆绿植')
+        self.assertEqual((after['aspect_ratio'], after['image_fit']), ('9:16', 'contain'))
+        self.assertEqual(self.call(url + '/plan', plan, guest, 'PUT')[0], 409)
+        plan['revision'] = after['plan_revision']
+        plan['scenes'][0]['visual_prompt'] = ' '
+        self.assertEqual(self.call(url + '/plan', plan, guest, 'PUT')[0], 422)
+
+    def test_planning_brief_round_trip_and_partial_rejection(self):
+        guest = self.visitor()
+        _, _, session = self.call('/api/v1/session', headers=guest)
+        limits = json.loads(session)['limits']
+        self.assertEqual((limits['narration_chars_per_second'], limits['min_target_seconds']), (4, 15))
+        _, _, home = self.call('/')
+        self.assertIn(b'id="purpose"', home)
+        self.assertIn(b'id="brief-enabled"', home)
+        self.assertIn('添加补充制作要求'.encode(), home)
+        review = self.call('/tasks/1/review')[2]
+        self.assertLess(review.index(b'id="plan-overview"'), review.index(b'id="generate"'))
+        body = {'script': '同一份材料。先有结果，再有问题。', 'purpose': '向同事说明做法', 'audience': '同事',
+                'focus': '先讲结果', 'target_duration_seconds': 60}
+        code, _, raw = self.call('/api/v1/tasks', body, guest)
+        self.assertEqual(code, 202)
+        url = json.loads(raw)['status_url']
+        for _ in range(50):
+            task = json.loads(self.call(url, headers=guest)[2])
+            if task['status'] == 'planned':
+                break
+            time.sleep(.02)
+        self.assertEqual(task['narration_budget_chars'], 240)
+        self.assertEqual((task['purpose'], task['audience'], task['focus'], task['target_duration_seconds']),
+                         ('向同事说明做法', '同事', '先讲结果', 60))
+        other = dict(body, purpose='向新同学介绍背景', audience='新同学', focus='先讲来龙去脉', target_duration_seconds=180)
+        self.assertEqual(self.call('/api/v1/tasks', other, guest)[0], 202)
+        code, _, raw = self.call('/api/v1/tasks', other, guest)
+        self.assertEqual(code, 409)
+        self.assertIn('相同文稿和制作要求', json.loads(raw)['detail'])
+        self.assertEqual(self.call('/api/v1/tasks', {'script': '另一份材料', 'purpose': '只有用途'}, guest)[0], 422)
+
+    def test_task_image_upload_round_trip_and_owner_isolation(self):
+        guest, other = self.visitor(), self.visitor()
+        code, _, raw = self.call('/api/v1/tasks', {'script': '图片导入接口测试'}, guest)
+        tid = json.loads(raw)['task_id']
+        for _ in range(50):
+            task = json.loads(self.call(f'/api/v1/tasks/{tid}', headers=guest)[2])
+            if task['status'] == 'planned':
+                break
+            time.sleep(.02)
+        image = Path(self.temp.name) / 'upload.png'
+        subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=32x20',
+                        '-frames:v', '1', str(image)], check=True)
+        headers = {**guest, 'Content-Type': 'image/png'}
+        url = f'/api/v1/tasks/{tid}/images'
+        code, _, raw = self.raw(url, image.read_bytes(), headers)
+        self.assertEqual(code, 201)
+        asset = json.loads(raw)
+        code, _, raw = self.raw(url, image.read_bytes(), headers)
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(raw)['id'], asset['id'])
+        code, _, raw = self.call(url, headers=guest)
+        self.assertEqual(json.loads(raw)[0]['id'], asset['id'])
+        self.assertEqual(self.call(asset['url'], headers=guest)[0], 200)
+        self.assertEqual(self.call(asset['url'], headers=other)[0], 404)
+        self.assertEqual(self.raw(url, image.read_bytes(), {**other, 'Content-Type': 'image/png'})[0], 404)
 
     def test_old_shared_session_does_not_become_admin(self):
         from app.app import signed_session

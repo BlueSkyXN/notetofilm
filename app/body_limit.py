@@ -16,6 +16,12 @@ class BodyLimitMiddleware:
         request = Request(scope)
         settings = scope['app'].state.config
         limit = settings.max_script * 6 + 196608
+        image_upload = scope['method'] == 'POST' and re.fullmatch(r'/api/v1/tasks/\d+/images', scope['path'])
+        if image_upload:
+            limit = settings.max_upload_image_bytes
+        if scope['method'] == 'PUT' and re.fullmatch(r'/api/v1/tasks/\d+/plan', scope['path']):
+            # 画面描述有独立限额，并覆盖 JSON 对中文使用 Unicode 转义的情况。
+            limit += min(settings.max_scenes, 100) * 4000 * 6
         headers = scope['headers']
         lengths = [value for name, value in headers if name.lower() == b'content-length']
         transfers = [value for name, value in headers if name.lower() == b'transfer-encoding']
@@ -59,7 +65,10 @@ class BodyLimitMiddleware:
         if declared is not None and declared != len(body):
             return await reject(400, '声明长度与实际请求体不一致')
         if body and scope['method'] not in ('GET', 'HEAD', 'OPTIONS'):
-            if request.headers.get('content-type', '').split(';')[0].strip().lower() != 'application/json':
+            content_type = request.headers.get('content-type', '').split(';')[0].strip().lower()
+            if image_upload and content_type not in ('image/png', 'image/jpeg'):
+                return await reject(400, '图片上传仅接受 image/png 或 image/jpeg')
+            if not image_upload and content_type != 'application/json':
                 return await reject(400, '写入接口仅接受 application/json')
         delivered = False
 

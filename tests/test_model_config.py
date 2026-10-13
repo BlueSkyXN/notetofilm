@@ -51,6 +51,39 @@ class ModelConfigTests(unittest.TestCase):
         second.open()
         self.assertEqual(second.current().llm_model, 'chosen-model')
 
+    def test_legacy_toml_and_snapshot_default_to_chat(self):
+        legacy = self.models.info()['text'].replace('wire_api = "chat"\n', '')
+        self.models.path.write_text(legacy)
+        second = ModelConfig(self.config)
+        second.open()
+        self.assertEqual(second.current().llm_wire_api, 'chat')
+        self.assertEqual(second.for_task(legacy).llm_wire_api, 'chat')
+        self.assertEqual(second.path.read_text(), legacy)
+        with self.assertRaises(ValueError):
+            second.validate(legacy.replace('[llm]', '[llm]\nwire_api = "unsupported"'))
+
+    def test_reference_protocol_defaults_and_freezes_per_task(self):
+        legacy = self.models.info()['text'].replace('reference_protocol = "none"\n', '')
+        self.models.path.write_text(legacy)
+        second = ModelConfig(self.config)
+        second.open()
+        original = second.snapshot()
+        self.assertEqual(second.current().image_reference_protocol, 'none')
+        info = second.info()
+        edited = encode(info['document']).replace('reference_protocol = "none"', 'reference_protocol = "openai-images-edit"')
+        second.save(edited, info['revision'])
+        self.assertEqual(second.current().image_reference_protocol, 'openai-images-edit')
+        self.assertEqual(second.for_task(original).image_reference_protocol, 'none')
+        with self.assertRaises(ValueError):
+            second.validate(edited.replace('reference_protocol = "openai-images-edit"', 'reference_protocol = "unsupported"'))
+
+    def test_wire_api_is_saved_and_frozen_per_task(self):
+        original = self.models.snapshot()
+        info = self.models.info()
+        self.models.save(info['text'].replace('wire_api = "chat"', 'wire_api = "responses"'), info['revision'])
+        self.assertEqual(self.models.current().llm_wire_api, 'responses')
+        self.assertEqual(self.models.for_task(original).llm_wire_api, 'chat')
+
     def test_bad_syntax_unknown_fields_and_plain_secrets_rejected(self):
         original = self.models.info()['text']
         for text in ('[broken', original + '\n[auth]\npassword="x"', original + '\n# ' + self.config.key,

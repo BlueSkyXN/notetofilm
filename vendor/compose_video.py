@@ -114,10 +114,12 @@ def verify_video(path, expected, args, ffprobe, tolerance, expected_frames=None)
 
 def clip_command(item, args, ffmpeg, work):
     size = f"{args.width}:{args.height}"
-    filters = (
-        f"scale={size}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
-        f"pad={size}:(ow-iw)/2:(oh-ih)/2:color=white,setsar=1,format=yuv420p"
-    )
+    if args.image_fit == 'cover':
+        filters = (f"scale={size}:force_original_aspect_ratio=increase:force_divisible_by=2,"
+                   f"crop={size},setsar=1,format=yuv420p")
+    else:
+        filters = (f"scale={size}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+                   f"pad={size}:(ow-iw)/2:(oh-ih)/2:color=white,setsar=1,format=yuv420p")
     return [
         ffmpeg, "-nostdin", "-hide_banner", "-v", "error", "-n",
         "-loop", "1", "-framerate", str(args.fps), "-i", item["image"],
@@ -152,6 +154,7 @@ def compose(args):
         "status": "planned", "manifest": str(manifest), "output": str(output),
         "work_dir": str(work), "scene_count": len(items),
         "width": args.width, "height": args.height, "fps": args.fps, "crf": args.crf,
+        "image_fit": args.image_fit,
         "sum_audio_duration_seconds": expected,
         "clip_tolerance_seconds": clip_tolerance, "total_tolerance_seconds": total_tolerance,
         "items": items,
@@ -211,6 +214,7 @@ def main():
     parser.add_argument("--render", action="store_true", help="真实编码；省略则只读检查并输出计划")
     parser.add_argument("--width", type=int, default=1920, help="输出宽度，正偶数，默认 1920")
     parser.add_argument("--height", type=int, default=1080, help="输出高度，正偶数，默认 1080")
+    parser.add_argument("--image-fit", choices=('contain', 'cover'), default='contain', help="contain 完整保留并补白；cover 居中裁切铺满")
     parser.add_argument("--fps", type=int, default=30, help="正整数帧率，默认 30")
     parser.add_argument("--crf", type=int, default=18, help="H.264 CRF，0–51，默认 18")
     args = parser.parse_args()

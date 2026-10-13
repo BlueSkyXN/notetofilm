@@ -6,8 +6,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import APIKeyCookie, APIKeyHeader
 
 from .auth import SESSION_SECONDS, VISITOR_SECONDS, signed_session
-from .schemas import (Accepted, ConfigEdit, ConfigRestore, Confirm, ErrorResponse, Gate, Generate,
-                      Health, Login, ModelSettings, Ok, Plan, RegenImage, SessionInfo, Submit, TaskDetail, TaskList)
+from .providers import NARRATION_CHARS_PER_SECOND, MIN_TARGET_SECONDS, max_target_seconds
+from .schemas import (Accepted, ConfigEdit, ConfigRestore, ConfigValidation, Confirm, ErrorResponse, Gate, Generate,
+                      Health, ImageAsset, Login, ModelSettings, Ok, Plan, RegenImage, Rename, SessionInfo, Submit,
+                      TaskDetail, TaskList)
 
 admin_header = APIKeyHeader(name='X-Access-Token', scheme_name='AdminToken', auto_error=False)
 admin_cookie = APIKeyCookie(name='ntf_admin', scheme_name='AdminCookie', auto_error=False)
@@ -54,7 +56,10 @@ def create_router():
         c = request.app.state.config
         return SessionInfo(admin=request.state.admin, ephemeral=bool(c.space_host), visitor_expires_in=VISITOR_SECONDS,
                            limits={'script_chars': c.max_script, 'scenes': c.max_scenes, 'daily_tasks': c.max_daily_tasks,
-                                   'visitor_daily_tasks': c.max_visitor_tasks, 'daily_images': c.max_daily_images})
+                                   'visitor_daily_tasks': c.max_visitor_tasks, 'daily_images': c.max_daily_images,
+                                   'narration_chars_per_second': NARRATION_CHARS_PER_SECOND,
+                                   'min_target_seconds': MIN_TARGET_SECONDS,
+                                   'max_target_seconds': max_target_seconds(c.max_video_seconds)})
 
     @router.post('/auth/login', tags=['Session'], response_model=Ok)
     def login(body: Login, request: Request):
@@ -86,7 +91,8 @@ def create_router():
 
     @tasks.post('', status_code=202, response_model=Accepted)
     def submit(body: Submit, request: Request, response: Response):
-        result = request.app.state.tasks.submit(body.script, request.state.owner)
+        result = request.app.state.tasks.submit(body.script, request.state.owner, body.aspect_ratio, body.image_fit,
+                                                 body.purpose, body.audience, body.focus, body.target_duration_seconds, body.title)
         response.headers['Location'] = f'/api/v1/tasks/{result["task_id"]}'
         return accepted(result['task_id'])
 
@@ -94,16 +100,52 @@ def create_router():
     def detail(tid: int, request: Request):
         return owned(request, tid).detail(tid)
 
+    @tasks.get('/{tid}/images', response_model=list[ImageAsset])
+    def images(tid: int, request: Request):
+        service = owned(request, tid)
+        with service.store.connect() as conn:
+            return [service.image_asset(tid, row) for row in service.image_asset_rows(conn, tid)]
+
+    @tasks.post('/{tid}/images', status_code=201, response_model=ImageAsset)
+    async def upload_image(tid: int, request: Request, response: Response):
+        content_type = request.headers.get('content-type', '').split(';', 1)[0].strip().lower()
+        try:
+            asset, created = owned(request, tid).upload_image(tid, await request.body(), content_type)
+        except HTTPException as exc:
+            raise exc
+        if not created:
+            response.status_code = 200
+        return asset
+
     @tasks.post('/{tid}/generate', status_code=202, response_model=Accepted)
     def generate(tid: int, body: Generate, request: Request):
-        return accepted(tid, owned(request, tid).generate(tid, body.confirmed, body.revision))
+        return accepted(tid, owned(request, tid).generate(tid, body.confirmed, body.revision, body.preview))
 
     @tasks.put('/{tid}/plan', response_model=Ok)
     def save_plan(tid: int, body: Plan, request: Request):
         try:
-            return owned(request, tid).save_plan(tid, body.scenes, body.revision)
+            scenes = [s if isinstance(s, str) else s.model_dump(exclude_none=True) for s in body.scenes]
+            return owned(request, tid).save_plan(tid, scenes, body.revision, body.aspect_ratio, body.image_fit, body.target_duration_seconds)
         except ValueError:
-            raise HTTPException(422, '分镜数量或旁白长度超过限制，未保存') from None
+            raise HTTPException(422, '分镜数量、旁白或画面描述无效或超出限制，未保存') from None
+
+    @tasks.post('/{tid}/pause', response_model=Ok)
+    def pause(tid: int, request: Request):
+        return owned(request, tid).request_pause(tid)
+
+    @tasks.put('/{tid}/title', response_model=Ok)
+    def rename(tid: int, body: Rename, request: Request):
+        return owned(request, tid).rename(tid, body.title)
+
+    @tasks.post('/{tid}/revise', response_model=Ok)
+    def revise(tid: int, request: Request):
+        return owned(request, tid).revise(tid)
+
+    @tasks.post('/{tid}/copy', status_code=202, response_model=Accepted)
+    def copy_next(tid: int, request: Request, response: Response):
+        result = owned(request, tid).copy_next(tid)
+        response.headers['Location'] = f'/api/v1/tasks/{result["task_id"]}'
+        return accepted(result['task_id'], result)
 
     @tasks.post('/{tid}/archive', response_model=Ok)
     def archive(tid: int, request: Request):
@@ -151,13 +193,13 @@ def create_router():
     def config(request: Request):
         return request.app.state.tasks.models.info()
 
-    @admin.post('/validate', response_model=Ok)
+    @admin.post('/validate', response_model=ConfigValidation)
     def validate_config(body: ConfigEdit, request: Request):
         try:
-            request.app.state.tasks.models.validate(body.text)
+            document = request.app.state.tasks.models.validate(body.text)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
-        return {'ok': True, 'message': '语法和参数校验通过；未调用模型，尚未保存'}
+        return {'ok': True, 'message': '语法和参数校验通过；未调用模型，尚未保存', 'document': document}
 
     @admin.put('', response_model=ModelSettings)
     def save_config(body: ConfigEdit, request: Request):

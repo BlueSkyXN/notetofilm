@@ -9,7 +9,7 @@ from app.tasks import Tasks
 
 
 class OfflineProviders(Providers):
-    def plan(self, script):
+    def plan(self, script, brief=None):
         return [script]
 
     def image(self, narration, output):

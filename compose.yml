@@ -16,6 +16,7 @@ services:
       OPENAI_BASE: ${OPENAI_BASE:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-origin-deepseek-v4-1-flash}
+      LLM_WIRE_API: ${LLM_WIRE_API:-chat}
       IMAGE_MODEL: ${IMAGE_MODEL:-gpt-image-2.5-sunburst}
       IMAGE_SIZE: ${IMAGE_SIZE:-1024x768}
       IMAGE_TIMEOUT: ${IMAGE_TIMEOUT:-300}

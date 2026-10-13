@@ -7,15 +7,29 @@
   <nav aria-label="站点导航"><button class="ghost theme-toggle" data-action="theme" type="button" aria-label="切换深色模式">◐</button><a href="/api-docs">API 文档</a><a href="/admin">管理员设置</a><button id="logout" class="ghost" type="button" hidden>退出管理员</button></nav>
 </div></header>
 <main class="main">
-  <div class="page-header"><div><div class="eyebrow">YOUR VIDEO WORKSPACE</div><h1>从一份文稿，到一支视频。</h1><p class="muted">先确认内容，再生成画面与旁白。每一步，由你决定。</p></div><a class="text-link" href="#tasks">继续已有任务 ↓</a></div>
-  <ol class="steps" aria-label="制作流程"><li aria-current="step"><span>01</span>输入文稿</li><li><span>02</span>确认分镜</li><li><span>03</span>复核图音</li><li><span>04</span>合成下载</li></ol>
+  <div class="page-header"><div><div class="eyebrow">YOUR VIDEO WORKSPACE</div><h1>从一份文稿，到一支视频。</h1><p class="muted">先粘贴文稿确认分镜，需要更精细的规划时再补充制作要求。每一步，由你决定。</p></div><a class="text-link" href="#tasks">继续已有任务 ↓</a></div>
+  <ol class="steps" aria-label="制作流程"><li aria-current="step"><span>01</span>提供材料</li><li><span>02</span>确认分镜</li><li><span>03</span>复核图音</li><li><span>04</span>合成下载</li></ol>
   <div class="studio">
     <section class="panel" aria-labelledby="input-title">
       <div class="panel-title"><h2 id="input-title">创建新视频</h2><span id="counter" class="counter">等待输入</span></div>
       <form id="submit-form">
+        <label class="checkline brief-toggle" for="brief-enabled"><input id="brief-enabled" type="checkbox">添加补充制作要求</label>
+        <div class="form-grid brief-fields">
+          <div class="wide"><label for="title">项目名称</label><input id="title" maxlength="80" placeholder="可选，用来区分期次，例如 10 月周报"></div>
+          <div><label for="purpose">用途</label><input id="purpose" required maxlength="40" placeholder="这支视频用来做什么"></div>
+          <div><label for="audience">受众</label><input id="audience" required maxlength="40" placeholder="谁来看"></div>
+          <div class="wide"><label for="focus">重点</label><input id="focus" required maxlength="80" placeholder="最需要讲清楚的一点"></div>
+          <div><label for="target-duration">目标时长（秒）</label><input id="target-duration" type="number" required min="15" max="600" value="180" inputmode="numeric"></div>
+        </div>
+        <p id="brief-note" class="fine muted">用途、受众和重点只用于组织分镜和旁白长短。画面仍不出现文字，数字、按钮和图表不会交给生图。</p>
         <label for="script" class="sr-only">输入文稿</label>
         <textarea id="script" rows="11" required aria-describedby="estimate input-limits" placeholder="粘贴你的文稿…&#10;&#10;可以用空行分段。生成分镜后，仍可修改旁白、增加或删除镜头。"></textarea>
         <p id="input-limits" class="fine muted"></p>
+        <div class="form-grid layout-controls">
+          <div><label for="aspect-ratio">成片画幅</label><select id="aspect-ratio"><option value="16:9">16:9 横屏 · 1920 × 1080</option><option value="9:16">9:16 竖屏 · 1080 × 1920</option></select></div>
+          <div><label for="image-fit">图片适配</label><select id="image-fit"><option value="contain">完整保留 · 比例不符时补白</option><option value="cover">铺满画面 · 居中裁切边缘</option></select></div>
+        </div>
+        <p class="fine muted">分镜页可调整画幅；按图片实际尺寸适配，复核时可预览成片构图。</p>
         <div class="panel-foot"><p id="estimate" class="fine muted">提交会生成分镜计划，可能调用付费模型；尚不生成图片和配音。</p><button id="submit" type="submit" class="primary">生成分镜计划 →</button></div>
       </form>
       <div id="notice" class="notice" role="status" aria-live="polite"></div>

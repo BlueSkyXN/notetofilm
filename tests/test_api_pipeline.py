@@ -89,7 +89,7 @@ class ApiPipelineTests(unittest.TestCase):
                 self.assertTrue(replay['replayed'])
                 self.assertEqual(replay['operation_id'], original['operation_id'])
                 self.assertEqual(call(status_url)[2]['image_requests'], 2)
-                self.assertEqual(call(regen_url, {**regen, 'expected_revision': 2})[0], 409)
+                self.assertEqual(call(regen_url, {**regen, 'expected_revision': regen['expected_revision'] + 1})[0], 409)
                 self.assertEqual(call('/api/v1/session', client=other)[0], 200)
                 self.assertEqual(call(regen_url, regen, client=other)[0], 404)
                 scene = detail['scenes'][0]
