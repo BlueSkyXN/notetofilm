@@ -4,6 +4,7 @@ import hmac
 import ipaddress
 import logging
 import secrets
+from asyncio import Semaphore
 from contextlib import asynccontextmanager
 from threading import Lock
 from urllib.parse import urlsplit
@@ -43,6 +44,7 @@ def create_app(config=None, service=None):
         application.state.visitor_key = settings.token or secrets.token_urlsafe(48)
         application.state.login_lock = Lock()
         application.state.login_failures = []
+        application.state.image_upload_slots = Semaphore(settings.max_active)
         try:
             yield
         finally:

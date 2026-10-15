@@ -411,8 +411,16 @@ class Tasks:
         return scene['img_state'] in ('ready', 'placeholder') and bool(scene['image_path']) and \
             (self.config.data / str(tid) / scene['image_path']).is_file()
 
+    def image_request_scene_ids(self, tid, scenes):
+        pending = set()
+        for scene in scenes:
+            if self.image_source(scene) == 'generated' and (
+                    not self.image_available(tid, scene) or self.previous_scene_id(scene) in pending):
+                pending.add(scene['id'])
+        return pending
+
     def image_requests_needed(self, tid, scenes):
-        return sum(self.image_source(s) == 'generated' and not self.image_available(tid, s) for s in scenes)
+        return len(self.image_request_scene_ids(tid, scenes))
 
     def image_capabilities(self, task):
         try:
@@ -427,12 +435,13 @@ class Tasks:
     def verify_image_references(self, conn, tid, task, scenes, force=False):
         capabilities = self.image_capabilities(task)
         scene_by_id = {scene['id']: scene for scene in scenes}
+        pending = self.image_request_scene_ids(tid, scenes)
         for scene in scenes:
             references = self.fixed_reference_ids(scene)
             previous_id = self.previous_scene_id(scene)
             if not references and previous_id is None or self.image_source(scene) != 'generated':
                 continue
-            if not force and self.image_available(tid, scene):
+            if not force and scene['id'] not in pending:
                 continue
             if not capabilities['fixed_references_supported'] or not self.has_gateway(task, 'image'):
                 raise HTTPException(409, '当前任务配置未启用参考图协议，不能发起带参考的生图请求')
@@ -459,6 +468,7 @@ class Tasks:
                    image_asset_id=asset['id'], image_path=asset['path'], img_state='ready', img_placeholder=0,
                    image_width=asset['width'], image_height=asset['height'], img_error=None)
         row['img_revision'] = max(row.get('img_revision') or 0, floor)
+        row.setdefault('img_approved', 0)
         row['img_ok'] = int(row['img_approved'] == row['img_revision'])
 
     @staticmethod
@@ -501,14 +511,6 @@ class Tasks:
             # 显式标识先预留，避免无标识的兼容请求抢占另一镜的素材。
             reserved = {s['id'] for s in plan if 'id' in s}
             assets = {row['id']: row for row in self.image_asset_rows(conn, tid)}
-            positions = {scene['id']: idx for idx, scene in enumerate(plan) if 'id' in scene}
-            for position, scene in enumerate(plan):
-                previous_id = scene.get('image', {}).get('previous_scene_id') if scene.get('image') else None
-                if previous_id is None:
-                    continue
-                identity = scene.get('id')
-                if identity not in positions or previous_id not in positions or positions[previous_id] >= position:
-                    raise HTTPException(409, '前镜引用必须是排序在前的稳定镜头；请重新选择引用')
             conn.execute('DELETE FROM scenes WHERE task_id=?', (tid,))
             changed_upstream_ids = set()
             for idx, scene in enumerate(plan):
@@ -534,7 +536,8 @@ class Tasks:
                                 row['audio_duration_seconds'] = None
                 else:
                     row = {'task_id': tid, 'idx': idx, **scene,
-                           'img_revision': floor, 'aud_revision': floor}
+                           'img_revision': floor, 'aud_revision': floor,
+                           'img_approved': 0, 'aud_approved': 0, 'img_ok': 0, 'aud_ok': 0}
                 explicit_image = scene.get('image')
                 previous_spec = self.image_spec(previous) if previous else {'source': 'generated', 'asset_id': None,
                                                                             'fixed_reference_asset_ids': [], 'previous_scene_id': None}
@@ -551,33 +554,35 @@ class Tasks:
                                      'fixed_reference_asset_ids': [], 'previous_scene_id': None}
                 else:
                     next_spec = previous_spec
-                if explicit_image and explicit_image['source'] == 'asset':
-                    asset = assets.get(explicit_image['asset_id'])
+                if next_spec['source'] == 'asset':
+                    asset = assets.get(next_spec['asset_id'])
                     if asset is None:
                         raise HTTPException(422, '所选图片不存在或不属于此任务')
-                    self.asset_ready(row, asset, floor)
-                elif explicit_image and explicit_image['source'] == 'generated':
+                    changed = not previous or previous_spec != next_spec or previous['image_path'] != asset['path']
+                    if changed:
+                        row.update(img_revision=floor, img_approved=0, img_ok=0)
+                    self.asset_ready(row, asset, row['img_revision'])
+                else:
                     row['image_spec_json'] = json.dumps(next_spec, ensure_ascii=False)
-                    row['image_asset_id'] = None
                     reference_changed = previous_spec != next_spec
                     if not previous or reference_changed:
                         row.update(img_state='pending', img_placeholder=0, image_path=None, img_revision=floor,
                                    img_approved=0, img_ok=0,
                                    image_width=None, image_height=None, img_error=None)
-                if previous and 'id' in previous and row.get('img_state') == 'pending' and not row.get('image_path'):
+                    if row.get('img_state') == 'pending' and not row.get('image_path'):
+                        row['image_asset_id'] = None
+                if previous and (row.get('image_path') != previous['image_path'] or
+                                 row.get('img_state') == 'pending' and not row.get('image_path')):
                     changed_upstream_ids.add(previous['id'])
-                elif previous and self.image_source(previous) == 'asset':
-                    previous_asset = assets.get(previous['image_asset_id'])
-                    if previous_asset is None:
-                        raise HTTPException(409, '此镜原选图片已缺失，请重新选择图片来源')
-                    self.asset_ready(row, previous_asset, floor)
-                elif not previous:
-                    row['image_spec_json'] = json.dumps(next_spec, ensure_ascii=False)
-                    row['image_asset_id'] = None
                 row.pop('image', None)
                 columns = ','.join(row)
                 conn.execute(f'INSERT INTO scenes({columns}) VALUES({",".join("?" for _ in row)})', tuple(row.values()))
-            for inserted in self.scenes(conn, tid):
+            saved = self.scenes(conn, tid)
+            positions = {scene['id']: scene['idx'] for scene in saved}
+            for inserted in saved:
+                previous_id = self.previous_scene_id(inserted)
+                if previous_id is not None and (previous_id not in positions or positions[previous_id] >= inserted['idx']):
+                    raise HTTPException(409, '前镜引用必须是排序在前的稳定镜头；请重新选择引用')
                 if self.image_source(inserted) != 'generated' or self.previous_scene_id(inserted) not in changed_upstream_ids:
                     continue
                 if inserted['img_state'] == 'ready' and inserted['image_path']:
@@ -662,6 +667,9 @@ class Tasks:
         for scene in scenes:
             if only_idx is not None and scene['idx'] != only_idx:
                 continue
+            # 上一镜生成后可能刚使当前镜头失效，不能沿用循环开始前的状态。
+            with self.store.connect() as conn:
+                scene = dict(conn.execute('SELECT * FROM scenes WHERE task_id=? AND id=?', (tid, scene['id'])).fetchone())
             for kind in ('img', 'aud'):
                 if self.pause_requested(tid, operation):
                     self.finish_paused(tid, operation)
@@ -1010,12 +1018,12 @@ class Tasks:
         available = self.models.availability(task.get('model_config', ''))
         task['configured'] = self.has_gateway(task, 'image') and available['image']
         task['model_available'] = available
+        task['image_capabilities'] = self.image_capabilities(task)
         task['config_revision'] = script_digest(task.pop('model_config'))[:12]
         task.pop('owner', None)
         task['image_request_limit'] = self.config.max_image_requests
         task['missing_images'] = self.missing_images(tid, scenes)
         task['image_requests_needed'] = self.image_requests_needed(tid, scenes)
-        task['image_capabilities'] = self.image_capabilities(task)
         task['audio_duration_seconds'] = self.audio_duration(scenes)
         task['max_video_seconds'] = self.config.max_video_seconds
         task['narration_budget_chars'] = narration_budget_chars(task.get('target_duration_seconds') or 0, self.config.max_script)

@@ -6,13 +6,18 @@ let current=null,pending=false,loading=false,editing=false,editorRevision=null,p
 const draftStorage=`ntf-plan-draft:${tid}`;
 let draftChecked=false,draftStored=false;
 let progressReceivedAt=performance.now();
+function sceneImageSpec(scene){return scene.image||{source:scene.image_source||'generated',asset_id:scene.image_source==='asset'?scene.image_asset_id:null,fixed_reference_asset_ids:scene.fixed_reference_asset_ids||[],previous_scene_id:scene.previous_scene_id??null};}
+function selectedReferences(row,value){
+  const saved=JSON.parse(row.dataset.fixedReferences||'[]');
+  return Number.isInteger(value)&&value>0?(saved[0]===value?saved:[value]):[];
+}
 function readPlanInputs(){return [...document.querySelectorAll('#plan-inputs .plan-row')].map(row=>{
   const source=row.querySelector('[data-field="image_source"]').value;
   const assetId=Number(row.querySelector('[data-field="image_asset"]').value);
   const fixedReference=Number(row.querySelector('[data-field="fixed_reference"]').value);
   const previousScene=Number(row.querySelector('[data-field="previous_scene"]').value);
   const image={source,asset_id:source==='asset'?assetId:null,
-    fixed_reference_asset_ids:source==='generated'&&Number.isInteger(fixedReference)&&fixedReference>0?[fixedReference]:[],
+    fixed_reference_asset_ids:source==='generated'?selectedReferences(row,fixedReference):[],
     previous_scene_id:source==='generated'&&Number.isInteger(previousScene)&&previousScene>0?previousScene:null};
   return {...(row.dataset.id?{id:Number(row.dataset.id)}:{}),narration:row.querySelector('[data-field="narration"]').value,
     visual_prompt:row.querySelector('[data-field="visual_prompt"]').value,image};
@@ -55,15 +60,16 @@ function planImpact(proposed){
   proposed.forEach((scene,index)=>{
     const old=Number.isInteger(scene.id)?prevById.get(scene.id):null;
     const label=`镜 ${String(index+1).padStart(2,'0')}`;
-    if(!old){lines.push(`${label}：新镜头，下次生成会请求图片和配音`);return;}
+    if(!old){lines.push(`${label}：新镜头，${sceneImageSpec(scene).source==='asset'?'使用已有图片，下次生成只补配音':'下次生成会请求图片和配音'}`);return;}
     const audio=old.narration!==scene.narration;
-    const sourceChanged=old.image_source!==(scene.image?.source||'generated');
-    const image=old.visual_prompt!==scene.visual_prompt||sourceChanged;
-    const referenceChanged=JSON.stringify(references.get(scene.id)||[])!==JSON.stringify([scene.image?.fixed_reference_asset_ids||[],scene.image?.previous_scene_id??null]);
-    if(!audio&&!image&&!referenceChanged)return;
-    const redo=[(image||referenceChanged)&&'图片',audio&&'配音'].filter(Boolean).join('和');
+    const spec=scene.image||sceneImageSpec(old);
+    const sourceChanged=old.image_source!==spec.source||(spec.source==='asset'&&old.image_asset_id!==spec.asset_id);
+    const referenceChanged=JSON.stringify(references.get(scene.id)||[])!==JSON.stringify([spec.fixed_reference_asset_ids||[],spec.previous_scene_id??null]);
+    const image=old.visual_prompt!==scene.visual_prompt||sourceChanged||referenceChanged;
+    if(!audio&&!image)return;
+    const redo=[image&&(spec.source==='asset'?'更新图片选择并重新确认':'重做图片'),audio&&'重做配音'].filter(Boolean).join('，');
     const keep=[!image&&'图片',!audio&&'配音'].filter(Boolean).join('和');
-    lines.push(`${label}：重做${redo}${keep?`，保留${keep}`:''}`);
+    lines.push(`${label}：${redo}${keep?`，保留${keep}`:''}`);
   });
   previous.forEach(scene=>{if(!proposed.some(item=>item.id===scene.id))lines.push(`镜 ${String(scene.idx+1).padStart(2,'0')}：从计划中移除，不删除历史文件`);});
   return lines.length?lines.join('；'):'当前修改不会重做图片或配音。';
@@ -101,6 +107,12 @@ async function redoImage(scene){
 }
 const stateLabel={pending:'待生成',running:'生成中',ready:'待确认',placeholder:'占位图·需重做',failed:'生成失败',unknown:'请求结果未知'};
 const titles={submitted:'正在准备分镜',generating:'正在生成',planned:'确认你的分镜',review:'检查画面与旁白',rendering:'正在合成视频',done:'成片已准备好',failed:'任务需要处理',interrupted:'任务已中断'};
+function restoreSelection(select,value){
+  if(value==null||value==='')return;
+  const selected=String(value);
+  if(![...select.options].some(option=>option.value===selected))select.add(new Option(`已失效 #${selected}，请重新选择`,selected));
+  select.value=selected;
+}
 function renderImageAssets(){
   const assets=current?.image_assets||[];
   const list=document.getElementById('image-asset-list');
@@ -118,16 +130,15 @@ function renderImageAssets(){
     select.replaceChildren(...(assets.length?[]:[new Option('此任务暂无图片','')]),
                            ...assets.map(asset=>new Option(`#${asset.id} · ${asset.width}×${asset.height}`,String(asset.id))));
     select.disabled=assets.length===0;
-    if([...select.options].some(option=>option.value===selected))select.value=selected;
-    else if(assets.length)select.value=String(assets[0].id);
-    const source=select.closest('.form-grid').querySelector('[data-field="image_source"]');
-    if(source.value==='asset'&&!select.value)source.value='generated';
+    restoreSelection(select,selected);
   });
   document.querySelectorAll('#plan-inputs [data-field="fixed_reference"]').forEach(select=>{
     const selected=select.value;
     select.replaceChildren(new Option('不使用固定参考',''),
                            ...assets.map(asset=>new Option(`保持参考 #${asset.id}`,String(asset.id))));
-    if([...select.options].some(option=>option.value===selected))select.value=selected;
+    restoreSelection(select,selected);
+    const saved=JSON.parse(select.closest('.plan-row').dataset.fixedReferences||'[]');
+    if(saved.length>1&&Number(select.value)===saved[0])select.selectedOptions[0].textContent+=`（另有 ${saved.length-1} 张参考）`;
     select.disabled=!(current?.image_capabilities?.fixed_references_supported);
   });
   document.querySelectorAll('#plan-inputs [data-field="image_asset"]').forEach(select=>{
@@ -211,8 +222,7 @@ function controls(){
   document.getElementById('preview').hidden=current.status!=='planned'||!!current.archived||current.expected_scenes<2||previewReady;
   document.getElementById('preview').disabled=locked||editing||overBudget()||(current.image_requests_needed>0&&current.model_available?.image===false);
   document.getElementById('generate').disabled=locked||editing||overBudget()||(current.image_requests_needed>0&&current.model_available?.image===false);
-  const playable=current.scenes.filter(scene=>scene.image&&scene.audio).length;
-  document.getElementById('play-draft').hidden=playable<2||current.status==='done'||!!current.archived;
+  document.getElementById('play-draft').hidden=!current.scenes.some(scene=>scene.image||scene.audio)||current.status==='done'||!!current.archived;
   document.getElementById('play-draft').disabled=locked;
   document.getElementById('pause').hidden=!current.busy||!!current.archived;
   document.getElementById('pause').disabled=pending||!current.busy||!!current.pause_requested;
@@ -239,23 +249,25 @@ function controls(){
   if(editing)document.getElementById('next-step').textContent=editorRevision!==current.plan_revision?'服务端分镜已更新。请复制需保留的内容后取消编辑，再基于最新版本修改。':overBudget()?'旁白仍超过预算。缩短旁白，或提高目标时长后保存。':'先保存分镜修改，再确认生成。';
   else if(planOpen)document.getElementById('next-step').textContent='编辑完成后保存，或取消编辑返回复核。';
   for(const s of current.scenes){
-    const card=cards.get(s.idx);if(!card)continue;
+    const card=cards.get(s.id);if(!card)continue;
     card.querySelector('.actions').hidden=current.status==='done'||!!current.archived;
     const saveScene=card.querySelector('[data-action="save-scene"]');
-    if(saveScene)saveScene.disabled=locked||planOpen;
+    if(saveScene)saveScene.disabled=locked||planOpen||Number(card.dataset.planRevision)!==current.plan_revision;
+    card.querySelector('[data-action="cancel-scene"]').disabled=locked;
     for(const kind of ['img','aud']){
       const pass=card.querySelector(`[data-action="${kind}-gate"]`);
       pass.disabled=locked||planOpen||current.status!=='review'||s[`${kind}_state`]!=='ready';
       pass.textContent=s[`${kind}_ok`]?`${kind==='img'?'图文':'配音'}已确认 ✓`:`确认${kind==='img'?'图文':'配音'}`;
       pass.className=s[`${kind}_ok`]?'ok':'';
       const regen=card.querySelector(`[data-action="${kind}-regen"]`);
-      regen.disabled=locked||planOpen||current.status!=='review'||(kind==='img'&&!current.configured)||s.image_source==='asset';
+      regen.disabled=locked||planOpen||current.status!=='review'||(kind==='img'&&(!current.configured||s.image_source==='asset'));
       regen.textContent=s[`${kind}_busy`]?'生成中…':kind==='img'?(s.image_source==='asset'?'在分镜中换图':'重做图'):'重配音';
     }
   }
 }
 function update(task){
   current=task;
+  if(draftPlayback&&draftPlayback.key!==draftKey(task))invalidateDraft();
   progressReceivedAt=performance.now();
   if(!draftChecked){
     draftChecked=true;
@@ -324,15 +336,20 @@ function update(task){
   document.getElementById('materials').hidden=!task.scenes.length||(task.status==='planned'&&!archived&&!task.scenes.some(s=>s.image||s.audio));
   document.getElementById('materials-title').textContent=done||archived?'素材明细':'逐镜复核';
   document.getElementById('materials-note').textContent=done||archived?'图片与配音保留供查阅。':'每镜的图片和配音都确认后，才可合成。';
-  const indices=new Set(task.scenes.map(s=>s.idx));
-  for(const [idx,card] of cards)if(!indices.has(idx)){card.remove();cards.delete(idx);}
+  const identities=new Set(task.scenes.map(s=>s.id));
+  for(const [id,card] of cards)if(!identities.has(id)){card.remove();cards.delete(id);}
   for(const s of task.scenes){
-    let card=cards.get(s.idx);
+    let card=cards.get(s.id);
     if(!card){
       card=document.createElement('section');card.className='scene';card.dataset.idx=s.idx;card.setAttribute('aria-label',`镜 ${String(s.idx+1).padStart(2,'0')}`);
-      card.innerHTML=`<h3>镜 ${String(s.idx+1).padStart(2,'0')}</h3><p class="narration"></p><details class="visual-details"><summary>画面描述</summary><p class="visual-prompt fine"></p></details><div class="media"></div><p class="muted fine scene-state"></p><p class="scene-error"></p><details class="scene-edit"><summary>修改这一镜</summary><label>旁白<textarea data-edit="narration" rows="3"></textarea></label><label>画面描述<textarea data-edit="visual" rows="3" maxlength="4000"></textarea></label><p class="fine" data-impact></p><button type="button" data-action="save-scene">保存这一镜</button></details><div class="actions"><button data-action="img-gate"></button><button data-action="img-regen"></button><button data-action="aud-gate"></button><button data-action="aud-regen"></button></div>`;
-      cards.set(s.idx,card);document.getElementById('scenes').append(card);
+      card.innerHTML=`<h3></h3><p class="narration"></p><details class="visual-details"><summary>画面描述</summary><p class="visual-prompt fine"></p></details><div class="media"></div><p class="muted fine scene-state"></p><p class="scene-error"></p><details class="scene-edit"><summary>修改这一镜</summary><label>旁白<textarea data-edit="narration" rows="3"></textarea></label><label>画面描述<textarea data-edit="visual" rows="3" maxlength="4000"></textarea></label><p class="fine" data-impact></p><button type="button" data-action="save-scene">保存这一镜</button><button type="button" class="ghost" data-action="cancel-scene">取消本镜修改</button></details><div class="actions"><button data-action="img-gate"></button><button data-action="img-regen"></button><button data-action="aud-gate"></button><button data-action="aud-regen"></button></div>`;
+      cards.set(s.id,card);
     }
+    card.dataset.idx=s.idx;card.dataset.id=s.id;
+    card.setAttribute('aria-label',`镜 ${String(s.idx+1).padStart(2,'0')}`);
+    card.querySelector('h3').textContent=`镜 ${String(s.idx+1).padStart(2,'0')}`;
+    const sceneList=document.getElementById('scenes');
+    if(sceneList.children[s.idx]!==card)sceneList.insertBefore(card,sceneList.children[s.idx]||null);
     card.querySelector('.narration').textContent=s.narration;
     card.querySelector('.visual-prompt').textContent=s.visual_prompt;
     const key=JSON.stringify([s.image,s.audio]);
@@ -346,7 +363,8 @@ function update(task){
     card.querySelector('.scene-error').textContent=[s.img_error,s.aud_error].filter(Boolean).join('；');
     const editor=card.querySelector('.scene-edit');
     editor.hidden=task.status==='done'||!!task.archived||task.busy;
-    if(!editor.open){editor.querySelector('[data-edit="narration"]').value=s.narration;editor.querySelector('[data-edit="visual"]').value=s.visual_prompt;editor.querySelector('[data-impact]').textContent='';}
+    if(!editor.open){card.dataset.planRevision=task.plan_revision;editor.querySelector('[data-edit="narration"]').value=s.narration;editor.querySelector('[data-edit="visual"]').value=s.visual_prompt;editor.querySelector('[data-impact]').textContent='';}
+    else if(Number(card.dataset.planRevision)!==task.plan_revision)editor.querySelector('[data-impact]').textContent='分镜已在其他页面更新，当前草稿尚未保存。请复制需保留的文字，再取消本镜修改并重新编辑。';
   }
   showLayout();showProgress();showOverview();showPlanImpact();
   renderImageAssets();
@@ -397,7 +415,7 @@ function updatePreviousSceneOptions(){
       if(id)options.push(new Option(`镜 ${String(sourceIndex+1).padStart(2,'0')} (#${id})`,id));
     });
     select.replaceChildren(...options);
-    if([...select.options].some(option=>option.value===selected))select.value=selected;
+    restoreSelection(select,selected);
     select.hidden=row.querySelector('[data-field="image_source"]').value!=='generated';
   });
 }
@@ -427,18 +445,20 @@ function addPlanInput(scene={narration:'',visual_prompt:''}){
   const reference=document.createElement('select');reference.dataset.field='fixed_reference';
   reference.addEventListener('input',rememberPlanDraft);reference.addEventListener('change',rememberPlanDraft);
   const fixedReferenceId=(imageSpec?.fixed_reference_asset_ids||scene.fixed_reference_asset_ids||[])[0];
-  if(Number.isInteger(fixedReferenceId))reference.value=String(fixedReferenceId);
+  row.dataset.fixedReferences=JSON.stringify(imageSpec?.fixed_reference_asset_ids||scene.fixed_reference_asset_ids||[]);
   const previousLabel=document.createElement('label');previousLabel.dataset.label='previous_scene';previousLabel.textContent='前镜参考';
   const previousScene=document.createElement('select');previousScene.dataset.field='previous_scene';
   previousScene.addEventListener('input',rememberPlanDraft);previousScene.addEventListener('change',rememberPlanDraft);
   const previousSceneId=imageSpec?.previous_scene_id??scene.previous_scene_id;
-  if(Number.isInteger(previousSceneId))previousScene.value=String(previousSceneId);
   source.addEventListener('change',()=>{asset.hidden=source.value!=='asset';reference.hidden=source.value!=='generated';previousScene.hidden=source.value!=='generated';rememberPlanDraft();});
   imageGroup.append(sourceLabel,source,assetLabel,asset,referenceLabel,reference,previousLabel,previousScene);fields.append(imageGroup);
   const remove=document.createElement('button');remove.type='button';remove.className='ghost';remove.textContent='删除此镜';
   remove.addEventListener('click',()=>{row.remove();renumber();rememberPlanDraft();});
   top.append(remove);row.append(top,fields);document.getElementById('plan-inputs').append(row);renumber();
   renderImageAssets();
+  restoreSelection(asset,imageSpec?.asset_id??scene.image_asset_id);
+  restoreSelection(reference,fixedReferenceId);
+  restoreSelection(previousScene,previousSceneId);
 }
 for(const id of ['aspect-ratio','image-fit','target-duration-edit'])document.getElementById(id).addEventListener('input',rememberPlanDraft);
 for(const id of ['aspect-ratio','image-fit'])document.getElementById(id).addEventListener('change',rememberPlanDraft);
@@ -488,26 +508,62 @@ document.getElementById('pause').addEventListener('click',async()=>{
   try{const result=await request(`/api/v1/tasks/${tid}/pause`,{});notice(result.message||'将在当前请求完成后暂停');await load();}
   catch(error){notice(error.message,true);}
 });
-function stopDraft(){
+let draftPlayback=null;
+function draftKey(task){return JSON.stringify([task.plan_revision,task.aspect_ratio,task.image_fit,task.scenes.map(s=>[s.id,s.image,s.audio,s.img_revision,s.aud_revision,s.img_state,s.aud_state])]);}
+function resetDraftAudio(){
   const audio=document.getElementById('draft-audio');
-  audio.onended=null;audio.pause();audio.removeAttribute('src');
+  audio.onended=null;audio.onerror=null;audio.pause();audio.removeAttribute('src');audio.load();
+  return audio;
+}
+function stopDraft(){
+  draftPlayback=null;resetDraftAudio();
   document.getElementById('draft-preview').hidden=true;
 }
+function invalidateDraft(){
+  draftPlayback=null;
+  const audio=resetDraftAudio();audio.hidden=true;
+  document.getElementById('draft-caption').textContent='分镜或素材版本已变化，预览已暂停。请重新开始连续预览。';
+}
 function playDraft(position=0){
-  const scenes=(current?.scenes||[]).filter(scene=>scene.image&&scene.audio);
-  if(!scenes.length){stopDraft();return;}
-  const scene=scenes[position]||scenes[0];
-  const index=scenes.indexOf(scene);
+  const playback=draftPlayback,scene=playback?.scenes[position];
+  if(!scene){stopDraft();return;}
+  playback.position=position;
   const section=document.getElementById('draft-preview');
   section.hidden=false;
-  document.getElementById('draft-frame').innerHTML=`<img src="${escapeText(scene.image)}" alt="草稿镜 ${scene.idx+1}">`;
-  document.getElementById('draft-caption').textContent=`草稿 ${index+1} / ${scenes.length} · 镜 ${String(scene.idx+1).padStart(2,'0')} · 这不是正式通过`;
-  const audio=document.getElementById('draft-audio');
+  const frame=document.getElementById('draft-frame');
+  frame.style.aspectRatio=playback.aspect_ratio.replace(':',' / ');
+  frame.classList.toggle('portrait',playback.aspect_ratio==='9:16');
+  const imageReady=scene.image&&['ready','placeholder'].includes(scene.img_state);
+  const audioReady=scene.audio&&scene.aud_state==='ready';
+  frame.innerHTML=imageReady?`<img src="${escapeText(scene.image)}" alt="草稿镜 ${scene.idx+1}">`:'<p class="muted">此镜画面尚未就绪</p>';
+  const caption=document.getElementById('draft-caption');
+  caption.textContent=`草稿 ${position+1} / ${playback.scenes.length} · 镜 ${String(scene.idx+1).padStart(2,'0')} · 这不是正式通过`;
+  const audio=resetDraftAudio();audio.hidden=!audioReady;
+  const failed=message=>{
+    if(draftPlayback!==playback||playback.position!==position)return;
+    audio.pause();audio.onended=null;audio.hidden=true;caption.textContent+=` · ${message}`;
+  };
+  if(imageReady){
+    const picture=frame.querySelector('img');picture.style.objectFit=playback.image_fit;
+    picture.onerror=()=>failed('画面加载失败，请检查素材后重新开始预览。');
+  }
+  if(!imageReady||!audioReady){
+    caption.textContent+=` · ${[!imageReady&&'画面',!audioReady&&'配音'].filter(Boolean).join('和')}尚未就绪，预览已暂停。补齐素材后重新开始预览。`;
+    audio.hidden=true;return;
+  }
   audio.src=scene.audio;
-  audio.onended=()=>{if(index+1<scenes.length)playDraft(index+1);else document.getElementById('draft-caption').textContent+=' · 草稿结束';};
-  audio.play().catch(()=>{});
+  audio.onerror=()=>failed('配音加载失败，请检查素材后重新开始预览。');
+  audio.onended=()=>{
+    if(draftPlayback!==playback)return;
+    if(position+1<playback.scenes.length)playDraft(position+1);else caption.textContent+=' · 草稿结束';
+  };
+  audio.play().catch(error=>{if(error.name!=='AbortError')failed('播放未能开始，请重新开始连续预览。');});
 }
-document.getElementById('play-draft').addEventListener('click',()=>playDraft(0));
+document.getElementById('play-draft').addEventListener('click',()=>{
+  if(!current)return;
+  draftPlayback={key:draftKey(current),aspect_ratio:current.aspect_ratio,image_fit:current.image_fit,scenes:current.scenes.map(scene=>({...scene}))};
+  playDraft(0);
+});
 document.getElementById('draft-stop').addEventListener('click',stopDraft);
 document.getElementById('compose').addEventListener('click',()=>action(()=>request(`/api/v1/tasks/${tid}/render`,{})));
 document.getElementById('retry').addEventListener('click',()=>action(async()=>{
@@ -517,18 +573,25 @@ document.getElementById('retry').addEventListener('click',()=>action(async()=>{
 document.getElementById('scenes').addEventListener('input',event=>{
   const field=event.target.closest('[data-edit]');if(!field)return;
   const card=field.closest('.scene');
-  const scene=current.scenes.find(item=>item.idx===Number(card.dataset.idx));
+  const scene=current.scenes.find(item=>item.id===Number(card.dataset.id));
   if(!scene)return;
+  if(Number(card.dataset.planRevision)!==current.plan_revision){card.querySelector('[data-impact]').textContent='分镜已在其他页面更新，请复制需保留的文字，再取消本镜修改并重新编辑。';return;}
   const narration=card.querySelector('[data-edit="narration"]').value,visual=card.querySelector('[data-edit="visual"]').value;
   card.querySelector('[data-impact]').textContent=planImpact(current.scenes.map(item=>item.idx===scene.idx?{id:item.id,narration,visual_prompt:visual}:{id:item.id,narration:item.narration,visual_prompt:item.visual_prompt}));
 });
 document.getElementById('scenes').addEventListener('click',async event=>{
   const button=event.target.closest('button[data-action]');if(!button||button.disabled)return;
-  const idx=Number(button.closest('.scene').dataset.idx),scene=current.scenes.find(s=>s.idx===idx);
+  const card=button.closest('.scene'),scene=current.scenes.find(s=>s.id===Number(card.dataset.id));
+  if(!scene)return;
+  const idx=scene.idx;
+  if(button.dataset.action==='cancel-scene'){card.querySelector('.scene-edit').open=false;update(current);return;}
   if(button.dataset.action==='save-scene'){
-    const card=button.closest('.scene');
     const narration=card.querySelector('[data-edit="narration"]').value,visual=card.querySelector('[data-edit="visual"]').value;
-    action(()=>request(`/api/v1/tasks/${tid}/plan`,{revision:current.plan_revision,scenes:current.scenes.map(item=>({id:item.id,narration:item.idx===idx?narration:item.narration,visual_prompt:item.idx===idx?visual:item.visual_prompt})),aspect_ratio:current.aspect_ratio,image_fit:current.image_fit},'PUT'));
+    const revision=Number(card.dataset.planRevision);
+    action(async()=>{
+      await request(`/api/v1/tasks/${tid}/plan`,{revision,scenes:current.scenes.map(item=>({id:item.id,narration:item.id===scene.id?narration:item.narration,visual_prompt:item.id===scene.id?visual:item.visual_prompt})),aspect_ratio:current.aspect_ratio,image_fit:current.image_fit},'PUT');
+      card.querySelector('.scene-edit').open=false;
+    });
     return;
   }
   const [kind,type]=button.dataset.action.split('-');

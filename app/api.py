@@ -4,6 +4,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import APIKeyCookie, APIKeyHeader
+from starlette.concurrency import run_in_threadpool
 
 from .auth import SESSION_SECONDS, VISITOR_SECONDS, signed_session
 from .providers import NARRATION_CHARS_PER_SECOND, MIN_TARGET_SECONDS, max_target_seconds
@@ -109,10 +110,9 @@ def create_router():
     @tasks.post('/{tid}/images', status_code=201, response_model=ImageAsset)
     async def upload_image(tid: int, request: Request, response: Response):
         content_type = request.headers.get('content-type', '').split(';', 1)[0].strip().lower()
-        try:
-            asset, created = owned(request, tid).upload_image(tid, await request.body(), content_type)
-        except HTTPException as exc:
-            raise exc
+        content = await request.body()
+        async with request.app.state.image_upload_slots:
+            asset, created = await run_in_threadpool(lambda: owned(request, tid).upload_image(tid, content, content_type))
         if not created:
             response.status_code = 200
         return asset

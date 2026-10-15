@@ -1,9 +1,13 @@
 import asyncio
 import json
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
+
+from fastapi import HTTPException
 
 from app.app import create_app
 from app.auth import new_visitor
@@ -68,6 +72,39 @@ class BodyLimitTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM daily_usage').fetchone()[0], 0)
         self.assertEqual(self.executor.jobs, [])
         self.assertEqual(self.app.state.login_failures, [])
+
+    async def test_upload_processing_does_not_block_health_and_is_bounded(self):
+        tid = self.service.submit('upload concurrency fixture')['task_id']
+        self.executor.run()
+        entered = threading.Event()
+        release = threading.Event()
+        lock = threading.Lock()
+        calls = 0
+
+        def normalize(*args):
+            nonlocal calls
+            with lock:
+                calls += 1
+                if calls == self.settings.max_active:
+                    entered.set()
+            release.wait(4)
+            raise HTTPException(422, '离线上传测试结束')
+
+        with patch.object(self.service, 'upload_image', normalize):
+            uploads = [asyncio.create_task(self.call(b'fixture', route=f'/api/v1/tasks/{tid}/images',
+                       content_type='image/png', extra=((b'x-access-token', self.settings.token.encode()),)))
+                       for _ in range(self.settings.max_active + 1)]
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                health, _, _ = await self.call(route='/healthz', method='GET')
+                self.assertEqual(health, 200)
+                self.assertEqual(calls, self.settings.max_active)
+                self.assertTrue(all(not task.done() for task in uploads))
+            finally:
+                release.set()
+                results = await asyncio.gather(*uploads)
+            self.assertTrue(all(result[0] == 422 for result in results))
+            self.assertEqual(calls, self.settings.max_active + 1)
 
     async def test_large_body_rejected_with_and_without_declared_length(self):
         body = b'{"script":"short"}' + b' ' * self.limit
