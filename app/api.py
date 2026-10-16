@@ -8,6 +8,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .auth import SESSION_SECONDS, VISITOR_SECONDS, signed_session
 from .providers import NARRATION_CHARS_PER_SECOND, MIN_TARGET_SECONDS, max_target_seconds
+from .persistence import PersistenceError
 from .schemas import (Accepted, ConfigEdit, ConfigRestore, ConfigValidation, Confirm, ErrorResponse, Gate, Generate,
                       Health, ImageAsset, Login, ModelSettings, Ok, Plan, RegenImage, Rename, SessionInfo, Submit,
                       TaskDetail, TaskList)
@@ -20,6 +21,8 @@ visitor_cookie = APIKeyCookie(name='ntf_visitor', scheme_name='VisitorCookie', a
 def visitor_access(request: Request, cookie: Annotated[str | None, Depends(visitor_cookie)],
                    header: Annotated[str | None, Depends(admin_header)],
                    admin: Annotated[str | None, Depends(admin_cookie)]):
+    if request.app.state.tasks.storage_failed:
+        raise PersistenceError()
     return request.state.owner
 
 
@@ -49,13 +52,15 @@ def create_router():
     admin = APIRouter(prefix='/admin/config', tags=['Admin configuration'], dependencies=[Depends(administrator)])
 
     @router.get('/health', tags=['System'], response_model=Health)
-    def health():
+    def health(request: Request):
+        if request.app.state.tasks.storage_failed:
+            raise PersistenceError()
         return Health()
 
     @router.get('/session', tags=['Session'], response_model=SessionInfo)
     def session(request: Request):
         c = request.app.state.config
-        return SessionInfo(admin=request.state.admin, ephemeral=bool(c.space_host), visitor_expires_in=VISITOR_SECONDS,
+        return SessionInfo(admin=request.state.admin, ephemeral=bool(c.space_host and not c.durable), visitor_expires_in=VISITOR_SECONDS,
                            limits={'script_chars': c.max_script, 'scenes': c.max_scenes, 'daily_tasks': c.max_daily_tasks,
                                    'visitor_daily_tasks': c.max_visitor_tasks, 'daily_images': c.max_daily_images,
                                    'narration_chars_per_second': NARRATION_CHARS_PER_SECOND,
@@ -216,8 +221,8 @@ def create_router():
             raise HTTPException(422, str(exc)) from None
 
     @admin.get('/export', response_class=Response, responses={200: {'content': {'application/toml': {}}}})
-    def export_config(request: Request):
-        text = request.app.state.tasks.models.info()['text']
+    def export_config(request: Request, include_secrets: bool = False):
+        text = request.app.state.tasks.models.export(include_secrets)
         return Response(text, media_type='application/toml', headers={'Content-Disposition': 'attachment; filename="config.toml"'})
 
     router.include_router(tasks)

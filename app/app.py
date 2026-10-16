@@ -20,6 +20,7 @@ from .auth import VISITOR_SECONDS, new_visitor, signed_session, valid_session, v
 from .body_limit import BodyLimitMiddleware
 from .config import Config, ROOT
 from .tasks import Tasks
+from .persistence import PersistenceError
 
 LOG = logging.getLogger('notetofilm.http')
 ERROR_CODES = {400: 'bad_request', 401: 'admin_required', 403: 'forbidden', 404: 'not_found',
@@ -36,7 +37,7 @@ def error_response(request, status, message, fields=None):
 def create_app(config=None, service=None):
     @asynccontextmanager
     async def lifespan(application):
-        settings = config or Config.from_env()
+        settings = config or Config.load()
         tasks = service or Tasks(settings)
         tasks.open()
         application.state.tasks = tasks
@@ -65,6 +66,10 @@ def create_app(config=None, service=None):
     async def validation_error(request, exc):
         fields = ['.'.join(str(p) for p in item['loc']) for item in exc.errors()]
         return error_response(request, 422, '请求参数未通过校验，请按接口文档检查字段', fields)
+
+    @application.exception_handler(PersistenceError)
+    async def storage_error(request, exc):
+        return error_response(request, 503, str(exc))
 
     application.add_middleware(BodyLimitMiddleware, error_response=error_response)
 
@@ -134,7 +139,9 @@ def create_app(config=None, service=None):
         return finish(response)
 
     @application.get('/healthz', include_in_schema=False)
-    def health_alias():
+    def health_alias(request: Request):
+        if request.app.state.tasks.storage_failed:
+            return JSONResponse({'status': 'storage_unavailable'}, status_code=503)
         return {'status': 'ok'}
 
     def static_page(page):

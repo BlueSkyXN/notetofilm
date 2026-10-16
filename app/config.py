@@ -1,6 +1,6 @@
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -23,6 +23,12 @@ def positive(env, name, default):
 @dataclass(frozen=True)
 class Config:
     data: Path
+    config_path: Path | None = None
+    backup_dir: Path | None = None
+    config_bucket: str = ''
+    data_bucket: str = ''
+    hf_token: str = field(default='', repr=False)
+    credentials: dict | None = field(default=None, repr=False)
     token: str = ''
     local_only: bool = False
     cookie_secure: bool = False
@@ -71,6 +77,15 @@ class Config:
     @property
     def image_connection(self):
         return (self.image_base, self.image_key) if self.image_base else (self.base, self.key)
+
+    @property
+    def durable(self):
+        return bool(self.data_bucket or self.backup_dir)
+
+    @classmethod
+    def load(cls, env=None):
+        from .full_config import load_config
+        return load_config(os.environ if env is None else env)
 
     @classmethod
     def from_env(cls, env=None):
@@ -130,7 +145,7 @@ class Config:
         if not self.token and not self.local_only:
             raise ValueError('必须配置 ACCESS_TOKEN；仅本机演示可显式设置 ALLOW_UNAUTHENTICATED_LOCAL=1')
         for label, base, key in [('OPENAI', self.base, self.key), ('LLM', self.llm_base, self.llm_key), ('IMAGE', self.image_base, self.image_key)]:
-            if base and not key and not (self.data / 'config.toml').is_file():
+            if base and not key and not (self.config_path or self.data / 'config.toml').is_file():
                 raise ValueError(f'{label} 地址已配置但缺少 API key')
             validate_gateway(base)
         if not self.allowed_hosts or any('/' in h or '*' in h for h in self.allowed_hosts):

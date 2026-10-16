@@ -3,6 +3,9 @@ import hashlib
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from threading import RLock
+
+from .persistence import PersistenceError
 
 
 def now():
@@ -14,10 +17,13 @@ def script_digest(script):
 
 
 class Store:
-    def __init__(self, data):
+    def __init__(self, data, snapshots=None):
         self.data = data
         self.path = data / 'tasks.db'
         self.lock = None
+        self.snapshots = snapshots
+        self.mutation_lock = RLock()
+        self.failure = False
 
     def open(self):
         self.data.mkdir(parents=True, exist_ok=True)
@@ -29,6 +35,8 @@ class Store:
             self.lock = None
             raise RuntimeError('此数据目录已被另一进程使用；只允许一个应用进程')
         try:
+            if self.snapshots:
+                self.snapshots.restore(self.data)
             self.migrate()
             self.recover()
         except Exception:
@@ -43,18 +51,28 @@ class Store:
 
     @contextmanager
     def connect(self, write=False):
-        conn = sqlite3.connect(self.path, timeout=30, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        try:
-            conn.execute('PRAGMA foreign_keys=ON')
-            conn.execute('BEGIN IMMEDIATE' if write else 'BEGIN')
-            yield conn
-            conn.commit()
-        except BaseException:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+        # 持久化确认之前不让其他读写观察新状态；失败后保留本地文件并停止新增操作。
+        with self.mutation_lock:
+            if self.failure:
+                raise PersistenceError()
+            conn = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute('PRAGMA foreign_keys=ON')
+                conn.execute('BEGIN IMMEDIATE' if write else 'BEGIN')
+                yield conn
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+            if write and self.snapshots:
+                try:
+                    self.snapshots.checkpoint(self.data, self.path)
+                except Exception:
+                    self.failure = True
+                    raise PersistenceError() from None
 
     def migrate(self):
         with self.connect(write=True) as conn:

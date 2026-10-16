@@ -1,14 +1,14 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>模型设置 · NoteToFilm</title><script src="/static/theme.js"></script><link rel="stylesheet" href="/static/style.css"><script src="/static/common.js" defer></script><script src="/static/admin.js" defer></script></head>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>管理设置 · NoteToFilm</title><script src="/static/theme.js"></script><link rel="stylesheet" href="/static/style.css"><script src="/static/common.js" defer></script><script src="/static/admin.js" defer></script></head>
 <body>
 <header class="topbar"><div class="topbar-inner">
-  <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">▶</span>NoteToFilm <span class="brand-sub">模型设置</span></a>
+  <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">▶</span>NoteToFilm <span class="brand-sub">管理设置</span></a>
   <nav aria-label="管理操作"><button class="ghost theme-toggle" data-action="theme" type="button" aria-label="切换深色模式" title="切换深色模式">◐</button><button id="logout" class="ghost" type="button">退出管理员</button></nav>
 </div></header>
 <main class="main">
   <div class="page-header"><div>
     <div class="eyebrow">ADMIN SETTINGS</div>
-    <h1>模型设置</h1>
+    <h1>管理设置</h1>
     <p class="muted">普通访客无需登录。只有管理员可以查看和修改此配置。</p>
   </div></div>
   <section class="card">
@@ -19,25 +19,29 @@
       <div><label for="llm-protocol">文字接口协议</label><select id="llm-protocol" data-setting="llm.wire_api"><option value="chat">Chat Completions</option><option value="responses">Responses API</option></select></div>
       <div><label for="llm-model">文字模型</label><input id="llm-model" data-setting="llm.model" maxlength="200" autocomplete="off"></div>
       <div><label for="llm-base">文字网关 Base URL</label><input id="llm-base" data-setting="llm.base_url" type="url" placeholder="https://gateway.example/v1" autocomplete="off"></div>
-      <div><label for="llm-key">文字密钥引用</label><select id="llm-key" data-setting="llm.api_key_env"><option>OPENAI_API_KEY</option><option>LLM_API_KEY</option><option>IMAGE_API_KEY</option></select></div>
+      <div><label for="llm-key">文字密钥条目</label><select id="llm-key" data-setting="llm.credential_ref"><option value="shared">共享密钥</option><option value="llm">文字专用密钥</option><option value="image">图片专用密钥</option></select></div>
       <div><label for="image-model">图片模型</label><input id="image-model" data-setting="image.model" maxlength="200" autocomplete="off"></div>
       <div><label for="image-reference-protocol">参考图协议</label><select id="image-reference-protocol" data-setting="image.reference_protocol"><option value="none">不使用参考图</option><option value="openai-images-edit">OpenAI Images Edit</option></select></div>
       <div><label for="image-size">请求图片尺寸</label><input id="image-size" data-setting="image.size" placeholder="1024x768 或 auto"><p class="fine muted field-help">成片画幅在每个任务中选择；网关可能返回其他尺寸。</p></div>
       <div><label for="image-base">图片网关 Base URL</label><input id="image-base" data-setting="image.base_url" type="url" placeholder="https://gateway.example/v1" autocomplete="off"></div>
-      <div><label for="image-key">图片密钥引用</label><select id="image-key" data-setting="image.api_key_env"><option>OPENAI_API_KEY</option><option>LLM_API_KEY</option><option>IMAGE_API_KEY</option></select></div>
+      <div><label for="image-key">图片密钥条目</label><select id="image-key" data-setting="image.credential_ref"><option value="shared">共享密钥</option><option value="llm">文字专用密钥</option><option value="image">图片专用密钥</option></select></div>
       <div><label for="image-quality">图片质量</label><select id="image-quality" data-setting="image.quality"><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="auto">auto</option></select></div>
       <div><label for="image-timeout">图片请求超时（秒）</label><input id="image-timeout" data-setting="image.timeout_seconds" type="number" min="1" max="600" step="1"></div>
       <div class="wide"><label for="image-style">统一画面风格</label><textarea id="image-style" data-setting="image.style" rows="2" maxlength="4000"></textarea></div>
       <div><label for="tts-voice">edge-tts 音色</label><input id="tts-voice" data-setting="tts.voice" maxlength="100" placeholder="zh-CN-YunxiNeural"></div>
+      <div data-file-only hidden><label for="shared-secret">共享 API key</label><input id="shared-secret" type="password" data-setting="credentials.shared" autocomplete="new-password"></div>
+      <div data-file-only hidden><label for="llm-secret">文字专用 API key</label><input id="llm-secret" type="password" data-setting="credentials.llm" autocomplete="new-password"></div>
+      <div data-file-only hidden><label for="image-secret">图片专用 API key</label><input id="image-secret" type="password" data-setting="credentials.image" autocomplete="new-password"></div>
     </div>
     <p id="form-state" class="fine muted" role="status">表单与 TOML 共用一份草稿。使用表单编辑会规范化 TOML 格式并去除注释。</p>
     <details id="advanced-config" class="advanced-config"><summary>高级设置 · TOML</summary>
       <label for="config">完整配置草稿</label>
       <textarea id="config" class="config-editor" rows="19" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
-      <p class="fine muted">直接编辑 TOML 后，点击“校验”将有效内容同步到表单；不会保存或调用模型。</p>
+      <p class="fine muted">直接编辑 TOML 后可先校验再保存。保存后，表单会重新载入生效配置。</p>
     </details>
     <p id="draft-state" class="muted fine" role="status"></p>
-    <p class="muted fine">只保存网关地址、模型和密钥引用。API key 仍由 HF Secrets / 环境变量提供，不会显示或写入此文件。保存只影响新任务，旧任务保留原配置；密钥轮换需要重启。</p>
+    <p class="muted fine" data-file-only hidden>完整配置文件保存模型、密钥和运行设置。已配置密钥以 __UNCHANGED__ 显示；保留它沿用现有值，填写新值会替换，清空会移除该条目。模型参数用于新任务，密钥更新用于后续请求；运行设置保存后需重启。</p>
+    <p class="muted fine" data-legacy-only>当前使用旧配置模式，密钥与运行设置由环境提供。迁移到独立完整配置文件后，可在此管理密钥和运行设置。</p>
     <label class="checkline"><input id="confirm-binding" type="checkbox">如网关或密钥引用发生变化，我确认该网关有权接收所选密钥和文稿。</label>
     <div class="actions"><button id="validate">校验</button><button id="save" class="primary">保存并应用</button><button id="reload">重新加载</button><button id="restore">恢复上一版</button><button id="export">导出 TOML</button></div>
     <div id="notice" class="notice" role="status" aria-live="polite"></div>
