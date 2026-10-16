@@ -10,8 +10,8 @@ from .auth import SESSION_SECONDS, VISITOR_SECONDS, signed_session
 from .providers import NARRATION_CHARS_PER_SECOND, MIN_TARGET_SECONDS, max_target_seconds
 from .persistence import PersistenceError
 from .schemas import (Accepted, ConfigEdit, ConfigRestore, ConfigValidation, Confirm, ErrorResponse, Gate, Generate,
-                      Health, ImageAsset, Login, ModelSettings, Ok, Plan, RegenImage, Rename, SessionInfo, Submit,
-                      TaskDetail, TaskList)
+                      Health, ImageAsset, Login, ModelSettings, Ok, Plan, PlanImpact, RegenImage, Rename, SessionInfo,
+                      Submit, TaskDetail, TaskList)
 
 admin_header = APIKeyHeader(name='X-Access-Token', scheme_name='AdminToken', auto_error=False)
 admin_cookie = APIKeyCookie(name='ntf_admin', scheme_name='AdminCookie', auto_error=False)
@@ -131,6 +131,15 @@ def create_router():
         try:
             scenes = [s if isinstance(s, str) else s.model_dump(exclude_none=True) for s in body.scenes]
             return owned(request, tid).save_plan(tid, scenes, body.revision, body.aspect_ratio, body.image_fit, body.target_duration_seconds)
+        except ValueError:
+            raise HTTPException(422, '分镜数量、旁白或画面描述无效或超出限制，未保存') from None
+
+    @tasks.post('/{tid}/plan/impact', response_model=PlanImpact)
+    def plan_impact_preview(tid: int, body: Plan, request: Request):
+        try:
+            scenes = [s if isinstance(s, str) else s.model_dump(exclude_none=True) for s in body.scenes]
+            return owned(request, tid).preview_plan_impact(tid, scenes, body.revision, body.aspect_ratio,
+                                                           body.image_fit, body.target_duration_seconds)
         except ValueError:
             raise HTTPException(422, '分镜数量、旁白或画面描述无效或超出限制，未保存') from None
 

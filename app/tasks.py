@@ -11,6 +11,8 @@ from threading import Event
 from fastapi import HTTPException
 
 from .db import Store, now, script_digest
+from .domain import plan_impact
+from .domain import references as reference_rules
 from .providers import (MIN_TARGET_SECONDS, NARRATION_CHARS_PER_SECOND, Providers,
                          max_target_seconds, narration_budget_chars)
 from .model_config import ModelConfig
@@ -392,50 +394,34 @@ class Tasks:
             raise HTTPException(409, '完整分镜计划缺失，请人工确认后重新规划')
 
     def next_revision(self, task, scenes):
-        return max([task['material_revision_floor'], *[s[f'{k}_revision'] for s in scenes for k in ('img', 'aud')]]) + 1
+        return plan_impact.next_revision(task['material_revision_floor'], scenes)
 
     def missing_images(self, tid, scenes):
         return sum(not self.image_available(tid, s) for s in scenes)
 
     @staticmethod
     def image_spec(scene):
-        if not scene.get('image_spec_json'):
-            return {'source': 'generated', 'asset_id': None, 'fixed_reference_asset_ids': [], 'previous_scene_id': None}
-        try:
-            value = json.loads(scene['image_spec_json'])
-        except (TypeError, ValueError):
-            return {'source': 'generated', 'asset_id': None, 'fixed_reference_asset_ids': [], 'previous_scene_id': None}
-        if not isinstance(value, dict) or value.get('source') not in ('generated', 'asset'):
-            return {'source': 'generated', 'asset_id': None, 'fixed_reference_asset_ids': [], 'previous_scene_id': None}
-        references = value.get('fixed_reference_asset_ids')
-        if not isinstance(references, list):
-            references = []
-        return {'source': value['source'], 'asset_id': value.get('asset_id'), 'fixed_reference_asset_ids': references,
-                'previous_scene_id': value.get('previous_scene_id')}
+        return reference_rules.image_spec(scene)
 
     @classmethod
     def image_source(cls, scene):
-        return cls.image_spec(scene)['source']
+        return reference_rules.image_source(scene)
 
     @classmethod
     def fixed_reference_ids(cls, scene):
-        return cls.image_spec(scene)['fixed_reference_asset_ids']
+        return reference_rules.fixed_reference_ids(scene)
 
     @classmethod
     def previous_scene_id(cls, scene):
-        return cls.image_spec(scene)['previous_scene_id']
+        return reference_rules.previous_scene_id(scene)
 
     def image_available(self, tid, scene):
         return scene['img_state'] in ('ready', 'placeholder') and bool(scene['image_path']) and \
             (self.config.data / str(tid) / scene['image_path']).is_file()
 
     def image_request_scene_ids(self, tid, scenes):
-        pending = set()
-        for scene in scenes:
-            if self.image_source(scene) == 'generated' and (
-                    not self.image_available(tid, scene) or self.previous_scene_id(scene) in pending):
-                pending.add(scene['id'])
-        return pending
+        available = {scene['id'] for scene in scenes if self.image_available(tid, scene)}
+        return plan_impact.image_request_scene_ids(scenes, available)
 
     def image_requests_needed(self, tid, scenes):
         return len(self.image_request_scene_ids(tid, scenes))
@@ -468,10 +454,8 @@ class Tasks:
                 raise HTTPException(409, '图片网关密钥不可用，不能发起带参考的生图请求')
             if len(references) + (1 if previous_id is not None else 0) > capabilities['max_fixed_references']:
                 raise HTTPException(422, f"固定与前镜参考合计最多 {capabilities['max_fixed_references']} 张")
-            if previous_id is not None:
-                upstream = scene_by_id.get(previous_id)
-                if upstream is None or upstream['idx'] >= scene['idx']:
-                    raise HTTPException(409, '前镜引用必须是排序在前的稳定镜头；请重新选择引用')
+            if previous_id is not None and not reference_rules.reference_order_ok(scene, scene_by_id):
+                raise HTTPException(409, '前镜引用必须是排序在前的稳定镜头；请重新选择引用')
             for asset_id in references:
                 asset = conn.execute('SELECT * FROM image_assets WHERE id=? AND task_id=?', (asset_id, tid)).fetchone()
                 path = self.config.data / str(tid) / asset['path'] if asset else None
@@ -479,15 +463,6 @@ class Tasks:
                     raise HTTPException(409, '固定参考图缺失，请重新选择或上传；未发起外部请求')
                 if asset['byte_size'] > 50 * 1024 * 1024:
                     raise HTTPException(422, '固定参考图超过供应商 50MB 上限')
-
-    @staticmethod
-    def asset_ready(row, asset, floor):
-        row.update(image_spec_json=json.dumps({'source': 'asset', 'asset_id': asset['id']}, ensure_ascii=False),
-                   image_asset_id=asset['id'], image_path=asset['path'], img_state='ready', img_placeholder=0,
-                   image_width=asset['width'], image_height=asset['height'], img_error=None)
-        row['img_revision'] = max(row.get('img_revision') or 0, floor)
-        row.setdefault('img_approved', 0)
-        row['img_ok'] = int(row['img_approved'] == row['img_revision'])
 
     @staticmethod
     def audio_duration(scenes):
@@ -502,115 +477,118 @@ class Tasks:
         plan = self.validate_plan(plan)
         with self.store.connect(write=True) as conn:
             task = self.task(conn, tid)
-            self.idle(task, {'planned', 'review', 'failed', 'interrupted'})
             old = self.scenes(conn, tid)
-            self.verify_plan(task, old)
-            duration = task['target_duration_seconds']
-            fingerprint = task['script_hash']
-            if target_duration_seconds is not None and target_duration_seconds != duration:
-                if not self.stored_brief(task):
-                    raise HTTPException(409, '这个任务没有制作要求，不能单独修改目标时长')
+            layout, layout_changed, floor, assets = self._plan_change_checks(
+                conn, tid, task, old, plan, revision, aspect_ratio, image_fit, target_duration_seconds)
+            duration, fingerprint = task['target_duration_seconds'], task['script_hash']
+            if target_duration_seconds is not None and target_duration_seconds != task['target_duration_seconds']:
                 brief = self.normalize_brief(task['purpose'], task['audience'], task['focus'], target_duration_seconds)
                 duration = brief['target_duration_seconds']
-                fingerprint = script_digest('\n'.join([task['script'], brief['purpose'], brief['audience'], brief['focus'], str(duration)]))
-                duplicate = conn.execute("SELECT id FROM tasks WHERE script_hash=? AND owner=? AND status!='done' AND archived=0 AND id!=? LIMIT 1",
-                                         (fingerprint, task['owner'], tid)).fetchone()
-                if duplicate:
-                    raise HTTPException(409, f'相同文稿和制作要求已有任务 {duplicate[0]}，请打开原任务继续')
-            if task['plan_revision'] != revision:
-                raise HTTPException(409, '分镜已被更新，请刷新后重新编辑')
-            layout = video_layout(aspect_ratio or task['aspect_ratio'], image_fit or task['image_fit'])
-            layout_changed = any(layout[k] != task[k] for k in ('aspect_ratio', 'image_fit'))
-            floor = self.next_revision(task, old)
-            used = set()
-            old_by_id = {s['id']: s for s in old}
-            if any('id' in s and s['id'] not in old_by_id for s in plan):
-                raise HTTPException(409, '分镜标识已失效，请刷新后重新编辑')
-            # 显式标识先预留，避免无标识的兼容请求抢占另一镜的素材。
-            reserved = {s['id'] for s in plan if 'id' in s}
-            assets = {row['id']: row for row in self.image_asset_rows(conn, tid)}
+                fingerprint = script_digest('\n'.join([task['script'], brief['purpose'], brief['audience'],
+                                                       brief['focus'], str(duration)]))
+            try:
+                rows, changed_upstream_ids = plan_impact.build_scene_rows(
+                    old, plan, {'task_id': tid, 'floor': floor, 'layout_changed': layout_changed, 'assets': assets})
+            except plan_impact.ImpactError as exc:
+                raise HTTPException(exc.status, exc.message) from None
             conn.execute('DELETE FROM scenes WHERE task_id=?', (tid,))
-            changed_upstream_ids = set()
-            for idx, scene in enumerate(plan):
-                matches = [s for s in old if s['id'] not in used | reserved and
-                           all(s[k] == scene[k] for k in ('narration', 'visual_prompt'))]
-                previous = old_by_id[scene['id']] if 'id' in scene else next((s for s in matches if s['idx'] == idx), matches[0] if matches else None)
-                if previous:
-                    used.add(previous['id'])
-                    row = dict(previous)
-                    row['idx'] = idx
-                    row.update({k: scene[k] for k in ('narration', 'visual_prompt')})
-                    for kind, field, path in (('img', 'visual_prompt', 'image_path'), ('aud', 'narration', 'audio_path')):
-                        changed = previous[field] != scene[field]
-                        if changed or previous['idx'] != idx or (kind == 'img' and layout_changed):
-                            row[f'{kind}_revision'] = floor
-                            row[f'{kind}_approved'] = floor if not changed and not (kind == 'img' and layout_changed) and previous[f'{kind}_state'] == 'ready' and previous[f'{kind}_revision'] > 0 and previous[f'{kind}_approved'] == previous[f'{kind}_revision'] else 0
-                            row[f'{kind}_ok'] = int(row[f'{kind}_approved'] == floor)
-                        if changed:
-                            row.update({f'{kind}_state': 'pending', f'{kind}_error': None, path: None})
-                            if kind == 'img':
-                                row.update(img_placeholder=0, image_width=None, image_height=None)
-                            else:
-                                row['audio_duration_seconds'] = None
-                else:
-                    row = {'task_id': tid, 'idx': idx, **scene,
-                           'img_revision': floor, 'aud_revision': floor,
-                           'img_approved': 0, 'aud_approved': 0, 'img_ok': 0, 'aud_ok': 0}
-                explicit_image = scene.get('image')
-                previous_spec = self.image_spec(previous) if previous else {'source': 'generated', 'asset_id': None,
-                                                                            'fixed_reference_asset_ids': [], 'previous_scene_id': None}
-                if explicit_image:
-                    if explicit_image['source'] == 'generated':
-                        missing_refs = [asset_id for asset_id in explicit_image['fixed_reference_asset_ids'] if asset_id not in assets]
-                        if missing_refs:
-                            raise HTTPException(422, '固定参考图不存在或不属于此任务')
-                        next_spec = {'source': 'generated', 'asset_id': None,
-                                     'fixed_reference_asset_ids': explicit_image['fixed_reference_asset_ids'],
-                                     'previous_scene_id': explicit_image['previous_scene_id']}
-                    else:
-                        next_spec = {'source': 'asset', 'asset_id': explicit_image['asset_id'],
-                                     'fixed_reference_asset_ids': [], 'previous_scene_id': None}
-                else:
-                    next_spec = previous_spec
-                if next_spec['source'] == 'asset':
-                    asset = assets.get(next_spec['asset_id'])
-                    if asset is None:
-                        raise HTTPException(422, '所选图片不存在或不属于此任务')
-                    changed = not previous or previous_spec != next_spec or previous['image_path'] != asset['path']
-                    if changed:
-                        row.update(img_revision=floor, img_approved=0, img_ok=0)
-                    self.asset_ready(row, asset, row['img_revision'])
-                else:
-                    row['image_spec_json'] = json.dumps(next_spec, ensure_ascii=False)
-                    reference_changed = previous_spec != next_spec
-                    if not previous or reference_changed:
-                        row.update(img_state='pending', img_placeholder=0, image_path=None, img_revision=floor,
-                                   img_approved=0, img_ok=0,
-                                   image_width=None, image_height=None, img_error=None)
-                    if row.get('img_state') == 'pending' and not row.get('image_path'):
-                        row['image_asset_id'] = None
-                if previous and (row.get('image_path') != previous['image_path'] or
-                                 row.get('img_state') == 'pending' and not row.get('image_path')):
-                    changed_upstream_ids.add(previous['id'])
-                row.pop('image', None)
+            for row in rows:
                 columns = ','.join(row)
-                conn.execute(f'INSERT INTO scenes({columns}) VALUES({",".join("?" for _ in row)})', tuple(row.values()))
-            saved = self.scenes(conn, tid)
-            positions = {scene['id']: scene['idx'] for scene in saved}
-            for inserted in saved:
-                previous_id = self.previous_scene_id(inserted)
-                if previous_id is not None and (previous_id not in positions or positions[previous_id] >= inserted['idx']):
-                    raise HTTPException(409, '前镜引用必须是排序在前的稳定镜头；请重新选择引用')
-                if self.image_source(inserted) != 'generated' or self.previous_scene_id(inserted) not in changed_upstream_ids:
-                    continue
-                if inserted['img_state'] == 'ready' and inserted['image_path']:
-                    conn.execute("UPDATE scenes SET img_state='pending',img_revision=?,img_approved=0,img_ok=0, "
-                                 "img_error='上游图片会重做；此镜需重新生成或改选固定参考。' "
-                                 'WHERE task_id=? AND id=?', (floor, tid, inserted['id']))
+                cursor = conn.execute(f'INSERT INTO scenes({columns}) VALUES({",".join("?" for _ in row)})', tuple(row.values()))
+                if 'id' not in row:
+                    row['id'] = cursor.lastrowid
+            try:
+                invalidations = plan_impact.finalize_impact(rows, changed_upstream_ids)['invalidations']
+            except plan_impact.ImpactError as exc:
+                raise HTTPException(exc.status, exc.message) from None
+            for invalidation in []:
+                conn.execute("UPDATE scenes SET img_state='pending',img_revision=?,img_approved=0,img_ok=0, "
+                             "img_error=? "
+                             'WHERE task_id=? AND id=?', (floor, invalidation['error'], tid, invalidation['id']))
             conn.execute("UPDATE tasks SET expected_scenes=?,plan_revision=plan_revision+1,status='planned',error=NULL,"
                          'video_path=NULL,material_revision_floor=?,aspect_ratio=?,image_fit=?,target_duration_seconds=?,script_hash=? WHERE id=?',
                          (len(plan), floor, layout['aspect_ratio'], layout['image_fit'], duration, fingerprint, tid))
         return {'ok': True}
+
+    def _plan_change_checks(self, conn, tid, task, old, plan, revision, aspect_ratio, image_fit, target_duration_seconds):
+        """保存与预演共用的只读校验；返回 (layout, layout_changed, floor, assets)。
+
+        校验顺序与 save_plan 一致：idle 状态、完整计划、制作要求与重复、
+        版本号、布局。任何违规抛 HTTPException，不产生写入。
+        """
+        self.idle(task, {'planned', 'review', 'failed', 'interrupted'})
+        self.verify_plan(task, old)
+        duration = task['target_duration_seconds']
+        fingerprint = task['script_hash']
+        if target_duration_seconds is not None and target_duration_seconds != duration:
+            if not self.stored_brief(task):
+                raise HTTPException(409, '这个任务没有制作要求，不能单独修改目标时长')
+            brief = self.normalize_brief(task['purpose'], task['audience'], task['focus'], target_duration_seconds)
+            duration = brief['target_duration_seconds']
+            fingerprint = script_digest('\n'.join([task['script'], brief['purpose'], brief['audience'],
+                                                   brief['focus'], str(duration)]))
+            duplicate = conn.execute("SELECT id FROM tasks WHERE script_hash=? AND owner=? AND status!='done' "
+                                     'AND archived=0 AND id!=? LIMIT 1',
+                                     (fingerprint, task['owner'], tid)).fetchone()
+            if duplicate:
+                raise HTTPException(409, f'相同文稿和制作要求已有任务 {duplicate[0]}，请打开原任务继续')
+        if task['plan_revision'] != revision:
+            raise HTTPException(409, '分镜已被更新，请刷新后重新编辑')
+        layout = video_layout(aspect_ratio or task['aspect_ratio'], image_fit or task['image_fit'])
+        layout_changed = any(layout[k] != task[k] for k in ('aspect_ratio', 'image_fit'))
+        floor = self.next_revision(task, old)
+        assets = {row['id']: dict(row) for row in self.image_asset_rows(conn, tid)}
+        return layout, layout_changed, floor, assets
+
+    def preview_plan_impact(self, tid, plan, revision, aspect_ratio=None, image_fit=None, target_duration_seconds=None):
+        """服务端修改影响预演：与保存同一套校验和规则，只读、不触发快照。"""
+        plan = self.validate_plan(plan)
+        with self.store.connect() as conn:
+            task = self.task(conn, tid)
+            old = self.scenes(conn, tid)
+            layout, layout_changed, floor, assets = self._plan_change_checks(
+                conn, tid, task, old, plan, revision, aspect_ratio, image_fit, target_duration_seconds)
+        try:
+            matched = plan_impact.match_plan_to_scenes(old, plan)
+            rows, changed_upstream_ids = plan_impact.build_scene_rows(
+                old, plan, {'task_id': tid, 'floor': floor, 'layout_changed': layout_changed, 'assets': assets})
+        except plan_impact.ImpactError as exc:
+            raise HTTPException(exc.status, exc.message) from None
+        for row in rows:
+            row.setdefault('id', -(row['idx'] + 1))
+        try:
+            invalidations = plan_impact.finalize_impact(rows, changed_upstream_ids)['invalidations']
+        except plan_impact.ImpactError as exc:
+            raise HTTPException(exc.status, exc.message) from None
+        invalidated = {item['id'] for item in invalidations}
+        available = set()
+        for row in rows:
+            path = self.config.data / str(tid) / row['image_path'] if row['image_path'] else None
+            if row['img_state'] in ('ready', 'placeholder') and path and path.is_file():
+                available.add(row['id'])
+        scenes = []
+        for idx, (row, previous) in enumerate(zip(rows, matched)):
+            if previous is None:
+                image_action = 'select' if row.get('image_asset_id') else 'redo'
+            elif row['img_state'] == 'pending':
+                image_action = 'redo'
+            elif plan_impact.image_spec(previous) != plan_impact.image_spec(row) or row['image_path'] != previous['image_path']:
+                image_action = 'select'
+            else:
+                image_action = 'keep'
+            scenes.append({
+                'id': row['id'] if row['id'] > 0 else None,
+                'index': idx,
+                'image': image_action,
+                'audio': 'redo' if (previous is None or row['aud_state'] == 'pending') else 'keep',
+                'img_approval_kept': row['img_state'] == 'ready' and row['img_revision'] > 0 and row['img_approved'] == row['img_revision'],
+                'aud_approval_kept': row['aud_state'] == 'ready' and row['aud_revision'] > 0 and row['aud_approved'] == row['aud_revision'],
+                'invalidated_by_upstream': row['id'] in invalidated,
+            })
+        removed = [scene['id'] for scene in old if scene['id'] not in {item['id'] for item in scenes}]
+        return {'ok': True, 'plan_revision': task['plan_revision'], 'image_requests_needed':
+                len(plan_impact.image_request_scene_ids(rows, available)),
+                'scenes': scenes, 'removed_scene_ids': removed}
 
     def image_budget(self, task, amount):
         if amount and self.has_gateway(task, 'image') and task['image_requests'] + amount > self.config.max_image_requests:
@@ -851,9 +829,7 @@ class Tasks:
                     conn.execute('UPDATE scenes SET image_asset_id=? WHERE task_id=? AND idx=?', (asset_id, tid, idx))
                     current_scenes = self.scenes(conn, tid)
                     dependent_floor = self.next_revision(task, current_scenes)
-                    for dependent in current_scenes:
-                        if self.previous_scene_id(dependent) != scene['id'] or dependent['img_state'] != 'ready' or not dependent['image_path']:
-                            continue
+                    for dependent in plan_impact.dependents_to_invalidate(current_scenes, scene['id']):
                         conn.execute("UPDATE scenes SET img_state='pending',img_revision=?,img_approved=0,img_ok=0,"
                                      "img_error='前镜图片已更新；请重新生成或改选固定参考。' WHERE task_id=? AND id=?",
                                      (dependent_floor, tid, dependent['id']))

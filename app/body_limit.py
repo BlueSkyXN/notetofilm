@@ -19,8 +19,9 @@ class BodyLimitMiddleware:
         image_upload = scope['method'] == 'POST' and re.fullmatch(r'/api/v1/tasks/\d+/images', scope['path'])
         if image_upload:
             limit = settings.max_upload_image_bytes
-        if scope['method'] == 'PUT' and re.fullmatch(r'/api/v1/tasks/\d+/plan', scope['path']):
-            # 画面描述有独立限额，并覆盖 JSON 对中文使用 Unicode 转义的情况。
+        if scope['method'] in ('PUT', 'POST') and re.fullmatch(r'/api/v1/tasks/\d+/plan(/impact)?', scope['path']):
+            # 画面描述有独立限额，并覆盖 JSON 对中文使用 Unicode 转义的情况；
+            # 预演与保存必须接受同样的合法请求体。
             limit += min(settings.max_scenes, 100) * 4000 * 6
         headers = scope['headers']
         lengths = [value for name, value in headers if name.lower() == b'content-length']

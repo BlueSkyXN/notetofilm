@@ -76,6 +76,24 @@ class Plan(Input):
     target_duration_seconds: int | None = None
 
 
+class PlanImpactScene(BaseModel):
+    id: int | None = None
+    index: int
+    image: Literal['keep', 'redo', 'select']
+    audio: Literal['keep', 'redo']
+    img_approval_kept: bool
+    aud_approval_kept: bool
+    invalidated_by_upstream: bool = False
+
+
+class PlanImpact(BaseModel):
+    ok: bool = True
+    plan_revision: int
+    image_requests_needed: int
+    scenes: list[PlanImpactScene]
+    removed_scene_ids: list[int] = Field(default_factory=list)
+
+
 class ConfigEdit(Input):
     text: str = Field(max_length=32768)
     revision: str = Field(min_length=64, max_length=64)
