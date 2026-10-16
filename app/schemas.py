@@ -221,6 +221,7 @@ class Progress(BaseModel):
     images_ready: int
     audio_ready: int
     total: int
+    jobs: dict[str, object] | None = None
 
 
 class TaskDetail(BaseModel):

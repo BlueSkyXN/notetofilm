@@ -3,7 +3,7 @@ import math
 import shutil
 import uuid
 import json
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import replace
 from datetime import datetime, timezone
 from threading import Event
@@ -11,7 +11,7 @@ from threading import Event
 from fastapi import HTTPException
 
 from .db import Store, now, script_digest
-from .domain import plan_impact
+from .domain import job_graph, plan_impact
 from .domain import references as reference_rules
 from . import jobs as job_records
 from .providers import (MIN_TARGET_SECONDS, NARRATION_CHARS_PER_SECOND, Providers,
@@ -21,13 +21,15 @@ from .image_assets import validate_and_normalize
 from .render import Renderer, digest, duration_error, run_process, validate_asset
 from .errors import UserFacingError
 from .layout import video_layout
-from .persistence import DirectoryBucket, HFBucket, Snapshots
+from .persistence import DirectoryBucket, HFBucket, PersistenceError, Snapshots
+from .scheduler import Scheduler
 
 LOG = logging.getLogger('notetofilm.tasks')
 
 
 class Tasks:
-    def __init__(self, config, providers=None, renderer=None, executor=None, validator=validate_asset):
+    def __init__(self, config, providers=None, renderer=None, executor=None, validator=validate_asset,
+                 scheduler=None):
         self.config = config
         bucket = HFBucket(config.data_bucket, config.hf_token) if config.data_bucket else DirectoryBucket(config.backup_dir) if config.backup_dir else None
         self.store = Store(config.data, Snapshots(bucket) if bucket else None)
@@ -36,9 +38,11 @@ class Tasks:
         self.models = ModelConfig(config)
         self.renderer = renderer or Renderer(config)
         self.executor = executor
+        self.scheduler = scheduler or Scheduler(config, stopping=None, storage_failed=self.storage_failed)
         self.validator = (lambda path, kind: validate_asset(path, kind, config.max_audio_seconds)) if validator is validate_asset else validator
         self.closed = False
         self.stopping = Event()
+        self.scheduler.stopping = self.stopping
         if hasattr(self.providers, 'stopping'):
             self.providers.stopping = self.stopping
         if hasattr(self.renderer, 'stopping'):
@@ -82,6 +86,7 @@ class Tasks:
         try:
             if self.executor:
                 self.executor.shutdown(wait=True)
+            self.scheduler.close()
         finally:
             self.store.close()
 
@@ -683,9 +688,6 @@ class Tasks:
     def generate_missing(self, tid, operation, recover_video=False, retry_images_confirmed=False, only_idx=None):
         with self.store.connect() as conn:
             task, scenes = self.task(conn, tid), self.scenes(conn, tid)
-            job_map = {}
-            for job in job_records.jobs_for_operation(conn, operation):
-                job_map.setdefault(job['scene_id'], {})[job['kind']] = job['id']
         self.verify_plan(task, scenes)
         if recover_video and all(self.approved(s) for s in scenes):
             with self.store.connect() as conn:
@@ -697,7 +699,7 @@ class Tasks:
         for scene in scenes:
             if only_idx is not None and scene['idx'] != only_idx:
                 continue
-            # 上一镜生成后可能刚使当前镜头失效，不能沿用循环开始前的状态。
+            # 复用校验：已有素材核对媒体有效性；损坏按 v0.3 规则处理。
             with self.store.connect() as conn:
                 scene = dict(conn.execute('SELECT * FROM scenes WHERE task_id=? AND id=?', (tid, scene['id'])).fetchone())
             for kind in ('img', 'aud'):
@@ -728,16 +730,120 @@ class Tasks:
                                              (duration.get('width'), duration.get('height'), tid, scene['idx']))
                         continue
                     except Exception:
+                        # 入口建闭包时素材仍为 ready，损坏在这里才暴露；补建作业
+                        # 让协调者按正常流程重新生成（册 W4：闭包不只扫描初始 pending）。
                         with self.store.connect(write=True) as conn:
                             conn.execute(f"UPDATE scenes SET {kind}_state='failed',{kind}_approved=0,{kind}_ok=0,{kind}_error=? WHERE task_id=? AND idx=?",
                                          ('已有素材损坏或缺失，请重新生成。', tid, scene['idx']))
+                            job_records.create_jobs(conn, tid, operation, task['plan_revision'],
+                                                    [{'scene_id': scene['id'], 'scene_index': scene['idx'],
+                                                      'kind': kind}])
                         if kind == 'img' and self.has_gateway(task, 'image') and not retry_images_confirmed:
                             self.fail(tid, operation, '检测到图片损坏，需再次人工确认后请求生图，未自动计费。')
                             return
-                self.asset(tid, operation, scene['idx'], kind, job_id=job_map.get(scene['id'], {}).get(kind))
+        self.coordinate_jobs(tid, operation, task, only_idx)
+
+    def coordinate_jobs(self, tid, operation, task, only_idx=None):
+        """协调者循环：就绪集合、全服务限流、失败／暂停与收尾。
+
+        依赖等待不占素材执行线程；只有拿到全局与任务槽位的就绪作业才
+        提交。暂停／失败信号检查与新认领在本循环内串行进行（手册 W4）。
+        """
+        with self.store.connect() as conn:
+            jobs = [job for job in job_records.jobs_for_operation(conn, operation)
+                    if only_idx is None or job['scene_index'] == only_idx]
+        jobs_by_id = {job['id']: job for job in jobs}
+        states = {job['id']: job['state'] for job in jobs}
+        inflight = {}
+        stop_dispatch, message = False, None
+        failure_detail = None
+
+        def snapshot():
+            return [{**job, 'state': states[job['id']]} for job in jobs_by_id.values()]
+
+        while True:
+            if not stop_dispatch:
+                if self.stopping.is_set() or self.store.failure:
+                    stop_dispatch, message = True, 'stopped'
+                elif self.pause_requested(tid, operation):
+                    stop_dispatch, message = True, 'paused'
+            if not stop_dispatch:
+                view = snapshot()
+                ready = job_graph.ready_job_ids(view)
+                for job_id in job_graph.execution_order(view):
+                    if states[job_id] != 'queued' or job_id in inflight:
+                        continue
+                    if job_id not in ready:
+                        continue
+                    release = self.scheduler.try_acquire(tid, jobs_by_id[job_id]['kind'])
+                    if release is None:
+                        if self.scheduler.should_stop():
+                            stop_dispatch, message = True, 'stopped'
+                        break
+                    inflight[job_id] = self.scheduler.submit(
+                        lambda j=job_id, r=release: self.run_asset(tid, operation, j, r))
+            if not inflight:
+                queued_left = [job_id for job_id, state in states.items() if state == 'queued']
+                if not queued_left:
+                    break  # 全部进入终态
+                # 无在途仍有排队：停止信号或上游失败阻断了依赖。
+                stop_dispatch = True
+                if message is None:
+                    message = 'failed'
+                break
+            done, _ = wait(inflight.values(), return_when=FIRST_COMPLETED, timeout=0.2)
+            for future in done:
+                job_id = next(id for id, pending in inflight.items() if pending is future)
+                del inflight[job_id]
+                try:
+                    states[job_id] = future.result()
+                except PersistenceError:
+                    # 存储故障：读写被拒，等待其余在途后交由重启恢复。
+                    states[job_id] = 'unknown'
+                    stop_dispatch, message = True, 'storage'
+                except InterruptedError:
+                    # 未开始执行：保持 running 由重启恢复规则处理。
+                    states[job_id] = 'running'
+                    stop_dispatch, message = True, 'stopped'
+                except Exception as exc:
+                    LOG.warning('task=%s operation=%s job=%s failed=%s', tid, operation, job_id, type(exc).__name__)
+                    states[job_id] = 'failed'
+                    stop_dispatch, message = True, 'failed'
+                    if failure_detail is None and isinstance(exc, HTTPException):
+                        failure_detail = str(exc.detail)
+        if inflight:
+            wait(list(inflight.values()))
+            for job_id, future in inflight.items():
+                try:
+                    states[job_id] = future.result()
+                except Exception:
+                    states[job_id] = 'failed'
+        if message == 'storage':
+            return
+        if message == 'stopped':
+            return  # worker 的 InterruptedError 分支负责 fail() 收尾
+        if message == 'paused':
+            self.finish_paused(tid, operation)
+            return
+        if message == 'failed':
+            self.fail(tid, operation, failure_detail or '有素材生成失败；已完成的素材保留，请检查后恢复。')
+            return
         with self.store.connect() as conn:
             scenes = self.scenes(conn, tid)
         self.finish(tid, operation, self.generation_status(tid, scenes))
+
+    def run_asset(self, tid, operation, job_id, release):
+        """素材执行器包装：持槽运行，任何路径都释放；返回作业终态。"""
+        try:
+            with self.store.connect() as conn:
+                job = job_records.job_row(conn, job_id)
+                if job is None or job['operation_id'] != operation:
+                    return 'cancelled'
+                idx, kind = job['scene_index'], job['kind']
+            self.asset(tid, operation, idx, kind, job_id=job_id)
+            return 'succeeded'
+        finally:
+            release()
 
     def asset(self, tid, operation, idx, kind, job_id=None):
         if self.stopping.is_set():
@@ -936,7 +1042,15 @@ class Tasks:
                 conn.execute('INSERT INTO image_requests(owner,request_key,parameter_hash,task_id,operation_id,created_at) VALUES(?,?,?,?,?,?)',
                              (owner, request_key, parameter_hash, tid, operation, now()))
         def work():
-            self.asset(tid, operation, idx, kind, job_id=job_id)
+            # 单镜重做与完整生成共用全服务限流入口（手册 W4）。
+            release = self.scheduler.acquire(tid, kind, should_stop=lambda: self.store.failure)
+            if release is None:
+                self.fail(tid, operation, '服务正在关闭或持久化不可用，请求未发起。')
+                raise HTTPException(503, '服务正在关闭或持久化不可用，请稍后恢复')
+            try:
+                self.asset(tid, operation, idx, kind, job_id=job_id)
+            finally:
+                release()
             self.finish(tid, operation, 'review')
         self.dispatch(tid, operation, work)
         return {'ok': True, 'operation_id': operation, 'replayed': False}
@@ -1109,6 +1223,25 @@ class Tasks:
             'audio_ready': sum(s['aud_state'] == 'ready' and bool(s['audio_path']) for s in scenes),
             'total': task['expected_scenes'],
         }
+        operation_jobs = []
+        if task['operation_id']:
+            with self.store.connect() as conn:
+                operation_jobs = [dict(row) for row in conn.execute(
+                    'SELECT scene_index,kind,state FROM jobs WHERE task_id=? AND operation_id=?',
+                    (tid, task['operation_id']))]
+        if task['busy'] and operation_jobs:
+            # 依据已持久状态展示；不显示尚未持久确认的成功（手册 W4）。
+            inflight = sorted((job for job in operation_jobs if job['state'] == 'running'),
+                              key=lambda job: (job['scene_index'], job['kind']))
+            task['progress']['jobs'] = {
+                'inflight': [{'scene_index': job['scene_index'], 'kind': job['kind']} for job in inflight],
+                'done': sum(job['state'] in job_records.TERMINAL_STATES for job in operation_jobs),
+                'total': len(operation_jobs),
+            }
+            # 兼容旧客户端：stage/scene_index 按镜头顺序取第一个在途作业。
+            if inflight:
+                task['progress']['scene_index'] = inflight[0]['scene_index']
+                task['progress']['stage'] = inflight[0]['kind']
         task['video'] = f'/api/v1/tasks/{tid}/files/{task["video_path"]}' if task['video_path'] else None
         for scene in scenes:
             scene['image_source'] = self.image_source(scene)

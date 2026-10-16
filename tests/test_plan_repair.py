@@ -55,8 +55,8 @@ class PlanRepairTests(unittest.TestCase):
         after = self.service.detail(self.tid)
         self.assertEqual(after['status'], 'review')
         self.assertEqual(after['image_requests'], 4)
-        self.assertEqual(self.provider.images, ['first', 'second', 'third', 'shorter second'])
-        self.assertEqual(self.provider.audios, ['first', 'second', 'third', 'shorter second'])
+        self.assertEqual(sorted(self.provider.images), sorted(['first', 'second', 'third', 'shorter second']))
+        self.assertEqual(sorted(self.provider.audios), sorted(['first', 'second', 'third', 'shorter second']))
         self.assertEqual([s['img_ok'] for s in after['scenes']], [1, 0, 1])
 
     def test_reordering_preserves_materials_but_rejects_stale_index_approval(self):

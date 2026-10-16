@@ -62,7 +62,7 @@ class StoryboardTests(unittest.TestCase):
         after = self.detail()
         self.assertEqual(after['image_requests'], 3)
         self.assertEqual(len(self.provider.images), 3)
-        self.assertEqual(self.provider.audios, ['第一段旁白', '第二段旁白', '第三段旁白', '改短的第二段旁白'])
+        self.assertEqual(sorted(self.provider.audios), sorted(['第一段旁白', '第二段旁白', '第三段旁白', '改短的第二段旁白']))
         self.assertEqual([s['aud_ok'] for s in after['scenes']], [1, 0, 1])
         self.assertEqual([s['img_ok'] for s in after['scenes']], [1, 1, 1])
 
@@ -74,7 +74,7 @@ class StoryboardTests(unittest.TestCase):
         self.assertEqual(self.detail()['missing_images'], 1)
         self.generate()
         after = self.detail()
-        self.assertEqual(self.provider.images, ['窗边的橘猫', '橘猫走向门口', '花园里的橘猫', '雨天窗边的橘猫'])
+        self.assertEqual(sorted(self.provider.images), sorted(['窗边的橘猫', '橘猫走向门口', '花园里的橘猫', '雨天窗边的橘猫']))
         self.assertEqual(len(self.provider.audios), 3)
         self.assertEqual(after['scenes'][0]['audio'], before['scenes'][0]['audio'])
         self.assertEqual(after['scenes'][0]['aud_revision'], before['scenes'][0]['aud_revision'])
