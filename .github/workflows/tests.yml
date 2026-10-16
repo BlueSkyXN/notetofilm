@@ -35,6 +35,7 @@ jobs:
       - name: Check frontend syntax
         run: |
           for file in app/static/*.js; do node --check "$file"; done
+          node --test tests/test_review_helpers.mjs
           git diff --check
       - name: Build production image with strict regression
         run: docker build --tag notetofilm:regression .

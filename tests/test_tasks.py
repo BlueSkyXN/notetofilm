@@ -396,7 +396,7 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(episode['copied_from'], tid)
         self.assertEqual([scene['narration'] for scene in episode['scenes']], ['first', 'second', 'third'])
         self.assertTrue(all(scene['image'] is None and scene['audio'] is None for scene in episode['scenes']))
-        self.assertIn('下一期', episode['title'])
+        self.assertIn('新草稿', episode['title'])
         self.raises_status(409, self.service.submit, 'fixture')
 
     def test_preview_stops_after_the_first_scene_until_generation_continues(self):

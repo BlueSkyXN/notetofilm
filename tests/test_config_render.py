@@ -12,7 +12,7 @@ from app.app import signed_session, valid_session
 from app.config import Config
 from app.db import Store
 from app.providers import Providers
-from app.render import Renderer, run_process, validate_asset
+from app.render import Renderer, atomic_json, digest, run_process, validate_asset
 from app.layout import video_layout
 
 
@@ -193,7 +193,9 @@ class RenderTests(unittest.TestCase):
             run_process(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1.2', '-c:a', 'libmp3lame', str(root / 'audio.mp3')], 30)
             validate_asset(root / 'image.png', 'img')
             validate_asset(root / 'audio.mp3', 'aud')
-            scenes = [{'idx': 0, 'narration': 'offline fixture', 'img_revision': 1, 'aud_revision': 1,
+            scenes = [{'id': 12, 'idx': 0, 'image_asset_id': 7,
+                       'image_references': {'fixed_references': [{'asset_id': 3, 'sha256': 'a' * 64}], 'previous_scene': None},
+                       'narration': 'offline fixture', 'img_revision': 1, 'aud_revision': 1,
                        'image_path': 'image.png', 'audio_path': 'audio.mp3'}]
             renderer = Renderer(Config(data=root, token='test'))
             (root / 'video.mp4').write_bytes(b'old incomplete file')
@@ -201,6 +203,23 @@ class RenderTests(unittest.TestCase):
             self.assertTrue((root / path).is_file())
             self.assertEqual(renderer.recover(root, scenes), path)
             self.assertEqual((root / 'video.mp4').read_bytes(), b'old incomplete file')
+            target = (root / path).parent
+            frozen = json.loads((target / 'frozen.json').read_text())
+            self.assertEqual(frozen['schema_version'], 2)
+            self.assertEqual(frozen['scenes'][0]['scene_id'], 12)
+            self.assertEqual(frozen['scenes'][0]['image_asset_id'], 7)
+            self.assertEqual(frozen['scenes'][0]['image_references'], scenes[0]['image_references'])
+            for changed in ({'id': 13}, {'image_asset_id': 8}, {'image_references': {}}):
+                with self.subTest(changed=changed):
+                    self.assertIsNone(renderer.recover(root, [{**scenes[0], **changed}]))
+            marker = json.loads((target / 'complete.json').read_text())
+            # 旧清单按原字段验证，新清单则同时核对稳定 ID 与实际参考。
+            for saved, expected in ((renderer.freeze(root, scenes, version=1), path),
+                                    ({'schema_version': 99, 'scenes': []}, None), (frozen, path)):
+                atomic_json(target / 'frozen.json', saved)
+                marker['frozen_sha256'] = digest(target / 'frozen.json')
+                atomic_json(target / 'complete.json', marker)
+                self.assertEqual(renderer.recover(root, scenes), expected)
             (root / path).write_bytes(b'')
             self.assertIsNone(renderer.recover(root, scenes))
 

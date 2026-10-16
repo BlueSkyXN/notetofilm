@@ -66,14 +66,22 @@ class Renderer:
         self.config = config
         self.stopping = None
 
-    def freeze(self, task_dir, scenes):
-        return [{
+    def freeze(self, task_dir, scenes, version=2):
+        frozen = [{
             'idx': s['idx'], 'narration': s['narration'],
             'img_revision': s['img_revision'], 'aud_revision': s['aud_revision'],
             'image_path': s['image_path'], 'audio_path': s['audio_path'],
             'image_sha256': digest(task_dir / s['image_path']),
             'audio_sha256': digest(task_dir / s['audio_path']),
         } for s in scenes]
+        if version == 1:
+            return frozen
+        if version != 2:
+            raise ValueError('不支持的素材清单版本')
+        for item, scene in zip(frozen, scenes):
+            item.update(scene_id=scene.get('id'), image_asset_id=scene.get('image_asset_id'),
+                        image_references=scene.get('image_references', {}))
+        return {'schema_version': 2, 'scenes': frozen}
 
     def render(self, task_dir, attempt, scenes, layout=None):
         layout = layout or video_layout()
@@ -129,7 +137,7 @@ class Renderer:
         renders = task_dir / 'renders'
         if not renders.is_dir():
             return None
-        frozen = None
+        frozen = {}
         for marker in sorted(renders.glob('*/complete.json'), reverse=True):
             try:
                 target = marker.parent
@@ -143,9 +151,13 @@ class Renderer:
                 for name, key in [('video.mp4', 'video_sha256'), ('video.build.json', 'report_sha256'), ('frozen.json', 'frozen_sha256')]:
                     if digest(target / name) != checks[key]:
                         raise ValueError('产物摘要不一致')
-                if frozen is None:
-                    frozen = self.freeze(task_dir, scenes)
-                if json.loads((target / 'frozen.json').read_text()) != frozen:
+                saved = json.loads((target / 'frozen.json').read_text())
+                version = 1 if isinstance(saved, list) else saved.get('schema_version') if isinstance(saved, dict) else None
+                if version not in (1, 2):
+                    continue
+                if version not in frozen:
+                    frozen[version] = self.freeze(task_dir, scenes, version)
+                if saved != frozen[version]:
                     continue
                 self.validate_output(target, layout)
                 return str((target / 'video.mp4').relative_to(task_dir))

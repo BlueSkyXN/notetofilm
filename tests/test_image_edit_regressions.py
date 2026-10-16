@@ -218,3 +218,31 @@ class ImageEditingRegressionTests(unittest.TestCase):
         self.assertEqual(len(after['image_assets']), len(before['image_assets']) + 1)
         self.assertEqual(after['scenes'][1]['image_asset_id'], before['scenes'][1]['image_asset_id'])
         self.assertEqual(after['image_assets'][-1]['context']['previous_scene']['asset_id'], before['scenes'][1]['image_asset_id'])
+
+    def test_render_records_actual_references_and_copy_resets_source_bindings(self):
+        assets = self.uploads()
+        rows = self.plan()
+        rows[0]['image'] = {'source': 'asset', 'asset_id': assets[0]['id']}
+        rows[1]['image'] = {'source': 'generated', 'fixed_reference_asset_ids': [assets[1]['id']],
+                            'previous_scene_id': rows[0]['id']}
+        self.save(rows)
+        self.generate()
+        detail = self.detail()
+        with self.service.store.connect() as conn:
+            frozen = self.service.render_scenes(conn, self.tid, self.service.scenes(conn, self.tid))
+        references = frozen[1]['image_references']
+        self.assertEqual(references['fixed_references'], [{'asset_id': assets[1]['id'], 'sha256': assets[1]['sha256']}])
+        self.assertEqual(references['previous_scene']['asset_id'], assets[0]['id'])
+        self.assertEqual(references['previous_scene']['sha256'], assets[0]['sha256'])
+        copied = self.service.detail(self.service.copy_next(self.tid)['task_id'])
+        self.assertEqual([s['narration'] for s in copied['scenes']], [s['narration'] for s in detail['scenes']])
+        self.assertEqual([s['visual_prompt'] for s in copied['scenes']], [s['visual_prompt'] for s in detail['scenes']])
+        self.assertTrue(set(s['id'] for s in copied['scenes']).isdisjoint(s['id'] for s in detail['scenes']))
+        self.assertEqual(copied['image_assets'], [])
+        for scene in copied['scenes']:
+            self.assertEqual(scene['image_source'], 'generated')
+            self.assertIsNone(scene['image_asset_id'])
+            self.assertEqual(scene['fixed_reference_asset_ids'], [])
+            self.assertIsNone(scene['previous_scene_id'])
+            self.assertIsNone(scene['image'])
+            self.assertIsNone(scene['audio'])

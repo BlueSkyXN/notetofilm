@@ -6,7 +6,6 @@ let current=null,pending=false,loading=false,editing=false,editorRevision=null,p
 const draftStorage=`ntf-plan-draft:${tid}`;
 let draftChecked=false,draftStored=false;
 let progressReceivedAt=performance.now();
-function sceneImageSpec(scene){return scene.image||{source:scene.image_source||'generated',asset_id:scene.image_source==='asset'?scene.image_asset_id:null,fixed_reference_asset_ids:scene.fixed_reference_asset_ids||[],previous_scene_id:scene.previous_scene_id??null};}
 function selectedReferences(row,value){
   const saved=JSON.parse(row.dataset.fixedReferences||'[]');
   return Number.isInteger(value)&&value>0?(saved[0]===value?saved:[value]):[];
@@ -52,32 +51,10 @@ function readDuration(){
   const value=Number(input.value);
   return input.closest('#duration-edit').hidden||!Number.isInteger(value)?{}:{target_duration_seconds:value};
 }
-function planImpact(proposed){
-  const previous=current?.scenes||[];
-  const prevById=new Map(previous.map(scene=>[scene.id,scene]));
-  const references=new Map(previous.map(scene=>[scene.id,[scene.fixed_reference_asset_ids||[],scene.previous_scene_id]]));
-  const lines=[];
-  proposed.forEach((scene,index)=>{
-    const old=Number.isInteger(scene.id)?prevById.get(scene.id):null;
-    const label=`镜 ${String(index+1).padStart(2,'0')}`;
-    if(!old){lines.push(`${label}：新镜头，${sceneImageSpec(scene).source==='asset'?'使用已有图片，下次生成只补配音':'下次生成会请求图片和配音'}`);return;}
-    const audio=old.narration!==scene.narration;
-    const spec=scene.image||sceneImageSpec(old);
-    const sourceChanged=old.image_source!==spec.source||(spec.source==='asset'&&old.image_asset_id!==spec.asset_id);
-    const referenceChanged=JSON.stringify(references.get(scene.id)||[])!==JSON.stringify([spec.fixed_reference_asset_ids||[],spec.previous_scene_id??null]);
-    const image=old.visual_prompt!==scene.visual_prompt||sourceChanged||referenceChanged;
-    if(!audio&&!image)return;
-    const redo=[image&&(spec.source==='asset'?'更新图片选择并重新确认':'重做图片'),audio&&'重做配音'].filter(Boolean).join('，');
-    const keep=[!image&&'图片',!audio&&'配音'].filter(Boolean).join('和');
-    lines.push(`${label}：${redo}${keep?`，保留${keep}`:''}`);
-  });
-  previous.forEach(scene=>{if(!proposed.some(item=>item.id===scene.id))lines.push(`镜 ${String(scene.idx+1).padStart(2,'0')}：从计划中移除，不删除历史文件`);});
-  return lines.length?lines.join('；'):'当前修改不会重做图片或配音。';
-}
 function showPlanImpact(){
   const note=document.getElementById('plan-impact');
   if(!note)return;
-  note.textContent=editing?planImpact(readPlanInputs()):'';
+  note.textContent=editing?planImpact(readPlanInputs(),current?.scenes||[]):'';
 }
 function rememberPlanDraft(){
   editing=true;
@@ -224,6 +201,9 @@ function controls(){
   document.getElementById('generate').disabled=locked||editing||overBudget()||(current.image_requests_needed>0&&current.model_available?.image===false);
   document.getElementById('play-draft').hidden=!current.scenes.some(scene=>scene.image||scene.audio)||current.status==='done'||!!current.archived;
   document.getElementById('play-draft').disabled=locked;
+  const resumeIndex=current.scenes.findIndex(scene=>scene.id===draftResumeSceneId);
+  document.getElementById('play-draft').textContent=resumeIndex>=0?`从镜 ${resumeIndex+1} 继续预览`:'连续预览草稿';
+  draftControls();
   document.getElementById('pause').hidden=!current.busy||!!current.archived;
   document.getElementById('pause').disabled=pending||!current.busy||!!current.pause_requested;
   document.getElementById('pause').textContent=current.pause_requested?'将在当前请求完成后暂停':'完成当前请求后暂停';
@@ -310,7 +290,7 @@ function update(task){
   const plannedOver=Number.isInteger(task.narration_budget_chars)&&savedChars>task.narration_budget_chars;
   document.getElementById('counts').textContent=!task.plan_complete?'正在规划镜头 · 尚未生成图音':task.status==='planned'?`共 ${task.expected_scenes} 镜 · 先核对制作方案`:`图文 ${img}/${task.expected_scenes} 已确认 · 配音 ${aud}/${task.expected_scenes} 已确认`;
   const guidance=archived?'此任务只读。需要重新制作时，可返回工作台提交文稿。':done?'先播放检查，再下载保存。素材明细保留在下方。':task.status==='planned'?`先核对下方制作方案，再生成图音。共 ${task.expected_scenes} 镜，预计请求 ${task.image_requests_needed} 张生成图片，并补齐配音；已有图片不请求生图。${plannedOver?'当前旁白超过预算，生成会停在确认。':''}${task.image_requests_needed>0&&task.model_available?.image===false?'图片供应商密钥当前不可用，可改用已导入图片。':task.image_requests_needed>0&&task.configured?'外部生成请求可能计费。':''}`:task.status==='rendering'?'正在合成已确认的素材，完成后会显示播放器。':['failed','interrupted'].includes(task.status)?'已完成的素材会保留。请查看错误说明；内容或时长不合适时可编辑分镜，其余情况再决定是否恢复。':task.busy?'后台正在处理，页面会自动更新。请勿重复提交。':'逐镜查看图片、试听配音。内容需要调整时可编辑分镜；重做后需重新确认新版本。';
-  document.getElementById('boundary').textContent=(task.copied_from?`这是从任务 #${task.copied_from} 复制的下一期。请核对日期、数据和结论，不会沿用上期画面、配音或成片。`:'')+guidance;
+  document.getElementById('boundary').textContent=(task.copied_from?`这是从任务 #${task.copied_from} 复制的旧稿，请先核对原文、旁白和画面描述，再选择图片并生成配音。`:'')+guidance;
   const duration=document.getElementById('duration-note'),total=task.audio_duration_seconds;
   const tooLong=Number.isFinite(total)&&total>task.max_video_seconds;
   const target=task.target_duration_seconds||0;
@@ -322,6 +302,16 @@ function update(task){
   duration.hidden=!Number.isFinite(total);
   duration.className='notice'+(tooLong?' error':'');
   duration.textContent=Number.isFinite(total)?`旁白总时长 ${total.toFixed(1)} 秒 / 上限 ${task.max_video_seconds} 秒。${comparison}${tooLong?'已超过上限，请编辑分镜，缩短或删除部分旁白后重新生成。':''}`:'';
+  const durationScenes=document.getElementById('duration-scenes');
+  durationScenes.hidden=!tooLong||done||archived;
+  durationScenes.replaceChildren();
+  if(tooLong&&!done&&!archived){
+    [...task.scenes].filter(s=>Number.isFinite(s.audio_duration_seconds)).sort((a,b)=>b.audio_duration_seconds-a.audio_duration_seconds).forEach(s=>{
+      const button=document.createElement('button');button.type='button';button.className='ghost';
+      button.textContent=`修改镜 ${s.idx+1} · ${s.audio_duration_seconds.toFixed(1)} 秒`;
+      button.disabled=task.busy||pending||planOpen;button.addEventListener('click',()=>editScene(s.id));durationScenes.append(button);
+    });
+  }
   document.getElementById('next-step').textContent=task.status==='planned'&&!task.busy&&!archived?(plannedOver?'旁白超过预算。缩短旁白，或提高目标时长并保存后，才能生成。':'核对上方的制作方案后，再生成图音。'):task.status==='review'&&!task.busy&&!archived?(tooLong?'请先编辑分镜处理时长超限。':img===task.expected_scenes&&aud===task.expected_scenes?'全部素材已确认，可以合成视频。':`还需确认 ${task.expected_scenes-img} 张图片、${task.expected_scenes-aud} 段配音。`):'';
   document.getElementById('request-details').hidden=false;
   document.getElementById('request-count').textContent=`生图请求已发起 ${task.image_requests}/${task.image_request_limit} 次（按请求计数，不是实际账单）。失败或结果未知的请求也可能已计费。`;
@@ -359,7 +349,7 @@ function update(task){
       if(picture){const dimensions=()=>{card.querySelector('.image-size').textContent=`原图 ${s.image_width||picture.naturalWidth} × ${s.image_height||picture.naturalHeight} · 点击预览查看原图`;};picture.addEventListener('load',dimensions,{once:true});if(picture.complete&&picture.naturalWidth)dimensions();}
       card.dataset.media=key;
     }
-    card.querySelector('.scene-state').textContent=`图片：${s.img_ok?'已确认':stateLabel[s.img_state]||s.img_state}（v${s.img_revision}） · 配音：${s.aud_ok?'已确认':stateLabel[s.aud_state]||s.aud_state}（v${s.aud_revision}）`;
+    card.querySelector('.scene-state').textContent=`图片：${s.img_ok?'已确认':stateLabel[s.img_state]||s.img_state}（v${s.img_revision}） · 配音：${s.aud_ok?'已确认':stateLabel[s.aud_state]||s.aud_state}（v${s.aud_revision}）${s.aud_state==='ready'&&Number.isFinite(s.audio_duration_seconds)?` · ${s.audio_duration_seconds.toFixed(1)} 秒`:''}`;
     card.querySelector('.scene-error').textContent=[s.img_error,s.aud_error].filter(Boolean).join('；');
     const editor=card.querySelector('.scene-edit');
     editor.hidden=task.status==='done'||!!task.archived||task.busy;
@@ -508,7 +498,7 @@ document.getElementById('pause').addEventListener('click',async()=>{
   try{const result=await request(`/api/v1/tasks/${tid}/pause`,{});notice(result.message||'将在当前请求完成后暂停');await load();}
   catch(error){notice(error.message,true);}
 });
-let draftPlayback=null;
+let draftPlayback=null,draftResumeSceneId=null;
 function draftKey(task){return JSON.stringify([task.plan_revision,task.aspect_ratio,task.image_fit,task.scenes.map(s=>[s.id,s.image,s.audio,s.img_revision,s.aud_revision,s.img_state,s.aud_state])]);}
 function resetDraftAudio(){
   const audio=document.getElementById('draft-audio');
@@ -516,18 +506,53 @@ function resetDraftAudio(){
   return audio;
 }
 function stopDraft(){
-  draftPlayback=null;resetDraftAudio();
+  draftPlayback=null;draftResumeSceneId=null;resetDraftAudio();
   document.getElementById('draft-preview').hidden=true;
+  controls();
 }
 function invalidateDraft(){
   draftPlayback=null;
   const audio=resetDraftAudio();audio.hidden=true;
   document.getElementById('draft-caption').textContent='分镜或素材版本已变化，预览已暂停。请重新开始连续预览。';
+  document.getElementById('draft-position').textContent='';
+  draftControls();
+}
+function draftControls(){
+  const p=draftPlayback,valid=!!p;
+  document.getElementById('draft-prev').disabled=!valid||p.position===0;
+  document.getElementById('draft-next').disabled=!valid||p.position>=p.scenes.length-1;
+  document.getElementById('draft-scene').disabled=!valid;
+  document.getElementById('draft-edit').disabled=!valid||pending||current?.busy||!!current?.archived||planOpen||editing||current?.status==='done';
+}
+function clockTime(seconds){
+  const whole=Math.floor(Math.max(0,seconds));
+  return `${Math.floor(whole/60)}:${String(whole%60).padStart(2,'0')}`;
+}
+function draftTime(){
+  const p=draftPlayback;if(!p)return;
+  const audio=document.getElementById('draft-audio');
+  const durations=p.scenes.map(s=>s.audio&&s.aud_state==='ready'&&Number.isFinite(s.audio_duration_seconds)&&s.audio_duration_seconds>0?s.audio_duration_seconds:null);
+  const elapsed=Number.isFinite(audio.currentTime)?audio.currentTime:0;
+  const complete=durations.every(d=>d!==null);
+  const local=`本镜 ${clockTime(elapsed)} / ${durations[p.position]===null?'待就绪':clockTime(durations[p.position])}`;
+  document.getElementById('draft-position').textContent=local+(complete?` · 全片 ${clockTime(durations.slice(0,p.position).reduce((a,b)=>a+b,0)+elapsed)} / ${clockTime(durations.reduce((a,b)=>a+b,0))}`:' · 全片时长待素材补齐');
+}
+function editScene(id){
+  if(!current||pending||current.busy||current.archived||planOpen||editing||current.status==='done')return;
+  const card=cards.get(id);if(!card)return;
+  document.getElementById('draft-audio').pause();
+  draftResumeSceneId=id;
+  const editor=card.querySelector('.scene-edit');editor.open=true;
+  card.scrollIntoView({behavior:'smooth',block:'center'});
+  editor.querySelector('[data-edit="narration"]').focus({preventScroll:true});
+  controls();
 }
 function playDraft(position=0){
   const playback=draftPlayback,scene=playback?.scenes[position];
   if(!scene){stopDraft();return;}
   playback.position=position;
+  const sequence=playback.sequence=(playback.sequence||0)+1;
+  draftResumeSceneId=scene.id;
   const section=document.getElementById('draft-preview');
   section.hidden=false;
   const frame=document.getElementById('draft-frame');
@@ -537,10 +562,14 @@ function playDraft(position=0){
   const audioReady=scene.audio&&scene.aud_state==='ready';
   frame.innerHTML=imageReady?`<img src="${escapeText(scene.image)}" alt="草稿镜 ${scene.idx+1}">`:'<p class="muted">此镜画面尚未就绪</p>';
   const caption=document.getElementById('draft-caption');
-  caption.textContent=`草稿 ${position+1} / ${playback.scenes.length} · 镜 ${String(scene.idx+1).padStart(2,'0')} · 这不是正式通过`;
+  caption.textContent=`草稿 ${position+1} / ${playback.scenes.length} · 镜 ${String(scene.idx+1).padStart(2,'0')}`;
+  const select=document.getElementById('draft-scene');
+  select.replaceChildren(...playback.scenes.map((s,i)=>new Option(`镜 ${i+1}${!s.image||!['ready','placeholder'].includes(s.img_state)?' · 缺图':''}${!s.audio||s.aud_state!=='ready'?' · 缺配音':''}`,String(i))));
+  select.value=String(position);draftControls();
   const audio=resetDraftAudio();audio.hidden=!audioReady;
+  draftTime();
   const failed=message=>{
-    if(draftPlayback!==playback||playback.position!==position)return;
+    if(draftPlayback!==playback||playback.sequence!==sequence)return;
     audio.pause();audio.onended=null;audio.hidden=true;caption.textContent+=` · ${message}`;
   };
   if(imageReady){
@@ -548,13 +577,13 @@ function playDraft(position=0){
     picture.onerror=()=>failed('画面加载失败，请检查素材后重新开始预览。');
   }
   if(!imageReady||!audioReady){
-    caption.textContent+=` · ${[!imageReady&&'画面',!audioReady&&'配音'].filter(Boolean).join('和')}尚未就绪，预览已暂停。补齐素材后重新开始预览。`;
+    caption.textContent+=` · ${[!imageReady&&'画面',!audioReady&&'配音'].filter(Boolean).join('和')}尚未就绪，预览已暂停。可补齐素材，或手动选择其他镜头。`;
     audio.hidden=true;return;
   }
   audio.src=scene.audio;
   audio.onerror=()=>failed('配音加载失败，请检查素材后重新开始预览。');
   audio.onended=()=>{
-    if(draftPlayback!==playback)return;
+    if(draftPlayback!==playback||playback.sequence!==sequence)return;
     if(position+1<playback.scenes.length)playDraft(position+1);else caption.textContent+=' · 草稿结束';
   };
   audio.play().catch(error=>{if(error.name!=='AbortError')failed('播放未能开始，请重新开始连续预览。');});
@@ -562,9 +591,16 @@ function playDraft(position=0){
 document.getElementById('play-draft').addEventListener('click',()=>{
   if(!current)return;
   draftPlayback={key:draftKey(current),aspect_ratio:current.aspect_ratio,image_fit:current.image_fit,scenes:current.scenes.map(scene=>({...scene}))};
-  playDraft(0);
+  const position=current.scenes.findIndex(scene=>scene.id===draftResumeSceneId);
+  playDraft(position<0?0:position);
+  document.getElementById('draft-preview').scrollIntoView({behavior:'smooth',block:'start'});
 });
 document.getElementById('draft-stop').addEventListener('click',stopDraft);
+document.getElementById('draft-prev').addEventListener('click',()=>{if(draftPlayback)playDraft(draftPlayback.position-1);});
+document.getElementById('draft-next').addEventListener('click',()=>{if(draftPlayback)playDraft(draftPlayback.position+1);});
+document.getElementById('draft-scene').addEventListener('change',event=>{if(draftPlayback)playDraft(Number(event.target.value));});
+document.getElementById('draft-edit').addEventListener('click',()=>{if(draftPlayback)editScene(draftPlayback.scenes[draftPlayback.position].id);});
+document.getElementById('draft-audio').addEventListener('timeupdate',draftTime);
 document.getElementById('compose').addEventListener('click',()=>action(()=>request(`/api/v1/tasks/${tid}/render`,{})));
 document.getElementById('retry').addEventListener('click',()=>action(async()=>{
   const result=await request(`/api/v1/tasks/${tid}/retry`,{confirmed:false});
@@ -577,7 +613,7 @@ document.getElementById('scenes').addEventListener('input',event=>{
   if(!scene)return;
   if(Number(card.dataset.planRevision)!==current.plan_revision){card.querySelector('[data-impact]').textContent='分镜已在其他页面更新，请复制需保留的文字，再取消本镜修改并重新编辑。';return;}
   const narration=card.querySelector('[data-edit="narration"]').value,visual=card.querySelector('[data-edit="visual"]').value;
-  card.querySelector('[data-impact]').textContent=planImpact(current.scenes.map(item=>item.idx===scene.idx?{id:item.id,narration,visual_prompt:visual}:{id:item.id,narration:item.narration,visual_prompt:item.visual_prompt}));
+  card.querySelector('[data-impact]').textContent=planImpact(current.scenes.map(item=>item.idx===scene.idx?{id:item.id,narration,visual_prompt:visual}:{id:item.id,narration:item.narration,visual_prompt:item.visual_prompt}),current.scenes);
 });
 document.getElementById('scenes').addEventListener('click',async event=>{
   const button=event.target.closest('button[data-action]');if(!button||button.disabled)return;

@@ -134,6 +134,17 @@ class Tasks:
     def image_asset_rows(self, conn, tid):
         return conn.execute('SELECT * FROM image_assets WHERE task_id=? ORDER BY id', (tid,)).fetchall()
 
+    def render_scenes(self, conn, tid, scenes):
+        assets = {row['id']: row for row in self.image_asset_rows(conn, tid)}
+        result = []
+        for scene in scenes:
+            asset = assets.get(scene.get('image_asset_id'))
+            context = self.image_asset(tid, asset)['context'] if asset else {}
+            references = {'fixed_references': context.get('fixed_references', []),
+                          'previous_scene': context.get('previous_scene')}
+            result.append({**scene, 'image_references': references})
+        return result
+
     def upload_image(self, tid, content, content_type):
         task_dir = self.config.data / str(tid)
         asset = validate_and_normalize(task_dir, content, content_type,
@@ -660,7 +671,9 @@ class Tasks:
             task, scenes = self.task(conn, tid), self.scenes(conn, tid)
         self.verify_plan(task, scenes)
         if recover_video and all(self.approved(s) for s in scenes):
-            recovered = self.renderer.recover(self.config.data / str(tid), scenes, video_layout(task['aspect_ratio'], task['image_fit']))
+            with self.store.connect() as conn:
+                frozen_scenes = self.render_scenes(conn, tid, scenes)
+            recovered = self.renderer.recover(self.config.data / str(tid), frozen_scenes, video_layout(task['aspect_ratio'], task['image_fit']))
             if recovered:
                 self.finish(tid, operation, 'done', recovered)
                 return
@@ -912,6 +925,7 @@ class Tasks:
             total = self.audio_duration(scenes)
             if total is not None and total > self.config.max_video_seconds:
                 raise HTTPException(409, str(duration_error(total, self.config.max_video_seconds)))
+            scenes = self.render_scenes(conn, tid, scenes)
             operation = self.claim(conn, tid, 'render', 'rendering')
         def work():
             video = self.renderer.render(self.config.data / str(tid), operation, scenes, video_layout(task['aspect_ratio'], task['image_fit']))
@@ -969,7 +983,7 @@ class Tasks:
         with self.store.connect(write=True) as conn:
             source = self.task(conn, tid)
             if source['archived'] or source['operation_id'] or not source['plan_complete']:
-                raise HTTPException(409, '要等分镜计划完整且当前没有操作进行时，才能复制为下一期')
+                raise HTTPException(409, '分镜计划完整且当前没有操作进行时，才能复制为新草稿')
             scenes = self.scenes(conn, tid)
             if not scenes:
                 raise HTTPException(409, '没有可复制的分镜')
@@ -983,7 +997,7 @@ class Tasks:
             self.reserve(conn, 'task', self.config.max_daily_tasks)
             sequence = conn.execute('SELECT COUNT(*) FROM tasks WHERE copied_from=?', (tid,)).fetchone()[0] + 1
             base = source['title'] or f'任务 {tid}'
-            suffix = '下一期' if sequence == 1 else f'下一期 {sequence}'
+            suffix = '新草稿' if sequence == 1 else f'新草稿 {sequence}'
             title = f'{base} · {suffix}'
             if len(title) > 80:
                 title = title[:80].rstrip()
@@ -1000,7 +1014,7 @@ class Tasks:
             for scene in scenes:
                 conn.execute('INSERT INTO scenes(task_id,idx,narration,visual_prompt) VALUES(?,?,?,?)',
                              (new_id, scene['idx'], scene['narration'], scene['visual_prompt']))
-        return {'ok': True, 'task_id': new_id, 'message': '已复制为下一期。请核对日期、数据和结论；不会沿用上期画面、配音或成片。'}
+        return {'ok': True, 'task_id': new_id, 'message': '已复制原文、旁白、画面描述和制作要求。请核对旧稿内容，重新选择图片并生成配音。'}
 
     def archive(self, tid):
         with self.store.connect(write=True) as conn:

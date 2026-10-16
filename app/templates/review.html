@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>视频任务 · NoteToFilm</title><script src="/static/theme.js"></script><link rel="stylesheet" href="/static/style.css"><script src="/static/common.js" defer></script><script src="/static/review.js" defer></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>视频任务 · NoteToFilm</title><script src="/static/theme.js"></script><link rel="stylesheet" href="/static/style.css"><script src="/static/common.js" defer></script><script src="/static/storyboard.js" defer></script><script src="/static/review.js" defer></script></head>
 <body>
 <header class="topbar"><div class="topbar-inner">
   <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">▶</span>NoteToFilm <span class="brand-sub">出口成片</span></a>
@@ -29,18 +29,20 @@
     <button id="pause" type="button" hidden>完成当前请求后暂停</button>
   </section>
   <section id="draft-preview" class="card" hidden>
-    <div class="panel-title"><h2>草稿连续预览</h2><span class="badge">不是正式通过</span></div>
+    <div class="panel-title"><h2>草稿连续预览</h2><span class="badge">逐镜试听</span></div>
     <div id="draft-frame" class="draft-frame"></div>
     <p id="draft-caption" class="fine muted"></p>
     <audio id="draft-audio" controls preload="none" aria-label="草稿旁白"></audio>
-    <div class="actions"><button id="draft-stop" type="button">停止预览</button></div>
+    <p id="draft-position" class="fine muted"></p>
+    <div class="actions draft-controls"><button id="draft-prev" type="button">上一镜</button><label class="sr-only" for="draft-scene">跳转镜头</label><select id="draft-scene" aria-label="跳转镜头"></select><button id="draft-next" type="button">下一镜</button><button id="draft-edit" type="button">修改当前镜头</button><button id="draft-stop" type="button">停止预览</button></div>
   </section>
   <p id="duration-note" class="notice" role="status" hidden></p>
+  <div id="duration-scenes" class="actions" hidden></div>
   <section id="finished" class="card finished" aria-labelledby="finished-title" hidden>
     <div class="panel-title"><div><h2 id="finished-title">你的成片</h2><p class="muted fine">播放检查画面与旁白，满意后下载保存。</p></div><a id="download" class="button primary" download>下载 MP4 ↓</a></div>
     <video id="video" controls playsinline preload="metadata" aria-label="成片播放器"></video>
-    <div class="actions"><button id="revise" type="button">修改为新版本</button><button id="copy-next" type="button">复制为下一期</button></div>
-    <p class="fine muted">请及时下载。修改为新版本会保留当前成片。复制为下一期只带走结构和制作要求，不带走画面、配音和成片。</p>
+    <div class="actions"><button id="revise" type="button">修改为新版本</button><button id="copy-next" type="button">复制为新草稿</button></div>
+    <p class="fine muted">修改为新版本会保留当前成片。复制为新草稿会复制原文、旁白、画面描述和制作要求；图片需重新选择，配音需重新生成。</p>
   </section>
   <section id="versions" class="card" hidden>
     <div class="panel-title"><h2>已保留的成片</h2></div>
