@@ -36,19 +36,13 @@ class Scheduler:
                 self._task_slots[tid] = BoundedSemaphore(max(1, self.config.task_inflight))
             return self._task_slots[tid]
 
-    def _release_task_slot(self, tid):
-        with self._task_lock:
-            slot = self._task_slots.pop(tid, None)
-        return slot
-
     def should_stop(self):
         return bool((self.stopping is not None and self.stopping.is_set()) or self.storage_failed())
 
-    def try_acquire(self, tid, kind, should_stop=None):
+    def try_acquire(self, tid, kind):
         """非阻塞获取槽位：拿到返回释放句柄；暂无槽位或应停止返回 None。
 
-        应停止与暂无槽位用 should_stop()/外部条件区分，协调者据此
-        决定重试还是收尾。
+        应停止与暂无槽位用 should_stop() 区分，协调者据此决定重试还是收尾。
         """
         global_slot = self.image_slots if kind == 'img' else self.audio_slots
         task_slot = self._task_slots_for(tid)

@@ -200,6 +200,71 @@ class SchedulerTests(unittest.TestCase):
         finally:
             rebuilt.close()
 
+    def test_pause_blocks_new_claims_within_transaction(self):
+        """暂停信号与认领在同一写事务内串行化（W4-4）：生效后不再有新付费请求。"""
+        from app.tasks import PauseRequested
+        tid = self.planned()
+        gate = __import__('threading').Event()
+        original_image = self.provider.image
+        claimed_after_pause = []
+
+        def image(prompt, output, references=None):
+            # 第一个图片完成后请求暂停，观察后续认领是否被拦截。
+            if not gate.is_set():
+                gate.set()
+                with self.service.store.connect(write=True) as conn:
+                    conn.execute('UPDATE tasks SET pause_requested=1 WHERE id=?', (tid,))
+            else:
+                claimed_after_pause.append(prompt)
+            original_image(prompt, output, references)
+
+        self.provider.image = image
+        self.service.generate(tid, True)
+        self.executor.run()
+        detail = self.service.detail(tid)
+        self.assertEqual(detail['status'], 'interrupted')
+        # 暂停生效后不再有新的付费图片请求（第一张之后的都不该发生）。
+        self.assertEqual(len([p for p in self.provider.images]), 1)
+
+    def test_regen_pause_transitions_to_interrupted(self):
+        from app.tasks import PauseRequested
+        tid = self.planned()
+        self.service.generate(tid, True)
+        self.executor.run()
+        import uuid as uuid_module
+        revision = self.service.detail(tid)['scenes'][0]['img_revision']
+        gate = __import__('threading').Event()
+        original_image = self.provider.image
+
+        def image(prompt, output, references=None):
+            with self.service.store.connect(write=True) as conn:
+                conn.execute('UPDATE tasks SET pause_requested=1 WHERE id=?', (tid,))
+            original_image(prompt, output, references)
+
+        self.provider.image = image
+        self.service.regen(tid, 0, 'img', True, revision, uuid_module.uuid4().hex)
+        self.executor.run()
+        detail = self.service.detail(tid)
+        self.assertEqual(detail['status'], 'interrupted')
+        self.assertIn('暂停', detail['error'])
+
+    def test_corrupt_upstream_refresh_includes_downstream_closure(self):
+        """恢复时损坏素材的下游闭包一并补建：操作不缺镜（审查确认项修复）。"""
+        chain = self._plan_with_chain()
+        tid = chain['tid']
+        # 损坏第一镜图片后把任务置 failed，再强制恢复重生成。
+        image_path = self.service.detail(tid)['scenes'][0]['image_path']
+        (self.config.data / str(tid) / image_path).write_bytes(b'')
+        with self.service.store.connect(write=True) as conn:
+            conn.execute("UPDATE tasks SET status='failed' WHERE id=?", (tid,))
+        before_images = len(self.provider.images)
+        self.service.retry(tid, True)
+        self.executor.run()
+        detail = self.service.detail(tid)
+        self.assertEqual(detail['status'], 'review')
+        # 损坏镜与其下游 B、C 都重新生成（3 张新图）。
+        self.assertEqual(len(self.provider.images), before_images + 3)
+
     def test_progress_reports_persisted_inflight_jobs(self):
         tid = self.planned()
         started = []

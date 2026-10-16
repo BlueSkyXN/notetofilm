@@ -196,5 +196,7 @@ class Store:
             conn.execute("UPDATE tasks SET status='interrupted',error=? WHERE operation_id IS NOT NULL "
                          "OR status IN ('submitted','generating','rendering')",
                          ('服务中断，已有成功素材保留，请核对后恢复。',))
-            conn.execute('UPDATE tasks SET operation_id=NULL,operation_kind=NULL,operation_scene=NULL')
+            # 崩溃可能落在 request_pause 与 finish_paused 之间；残留标志会让
+            # 下一次恢复立即"暂停"，重启时清零。
+            conn.execute('UPDATE tasks SET operation_id=NULL,operation_kind=NULL,operation_scene=NULL,pause_requested=0')
             conn.execute('UPDATE tasks SET operation_started_at=NULL,progress_stage=NULL,progress_scene=NULL,progress_started_at=NULL')

@@ -27,6 +27,19 @@ from .scheduler import Scheduler
 LOG = logging.getLogger('notetofilm.tasks')
 
 
+class PauseRequested(Exception):
+    """认领事务内检测到暂停请求：作业留 queued，由收尾转为 interrupted。"""
+
+
+def error_detail(exc):
+    """提取异常的用户可见文案；HTTPException 取 detail。"""
+    if isinstance(exc, HTTPException):
+        return str(exc.detail)
+    if isinstance(exc, UserFacingError):
+        return str(exc)
+    return None
+
+
 class Tasks:
     def __init__(self, config, providers=None, renderer=None, executor=None, validator=validate_asset,
                  scheduler=None):
@@ -696,6 +709,7 @@ class Tasks:
             if recovered:
                 self.finish(tid, operation, 'done', recovered)
                 return
+        corrupt_refreshed = False
         for scene in scenes:
             if only_idx is not None and scene['idx'] != only_idx:
                 continue
@@ -730,17 +744,20 @@ class Tasks:
                                              (duration.get('width'), duration.get('height'), tid, scene['idx']))
                         continue
                     except Exception:
-                        # 入口建闭包时素材仍为 ready，损坏在这里才暴露；补建作业
-                        # 让协调者按正常流程重新生成（册 W4：闭包不只扫描初始 pending）。
+                        # 入口建闭包时素材仍为 ready，损坏在这里才暴露。
                         with self.store.connect(write=True) as conn:
                             conn.execute(f"UPDATE scenes SET {kind}_state='failed',{kind}_approved=0,{kind}_ok=0,{kind}_error=? WHERE task_id=? AND idx=?",
                                          ('已有素材损坏或缺失，请重新生成。', tid, scene['idx']))
-                            job_records.create_jobs(conn, tid, operation, task['plan_revision'],
-                                                    [{'scene_id': scene['id'], 'scene_index': scene['idx'],
-                                                      'kind': kind}])
+                        corrupt_refreshed = True
                         if kind == 'img' and self.has_gateway(task, 'image') and not retry_images_confirmed:
                             self.fail(tid, operation, '检测到图片损坏，需再次人工确认后请求生图，未自动计费。')
                             return
+        if corrupt_refreshed:
+            # 重算闭包补齐作业：损坏素材标 failed 后，其下游（将因上游重做而
+            # 失效的镜头）需要一并纳入本次作业集，避免操作少生成一镜。
+            # 用最新库内状态重读分镜——循环前的快照里损坏素材仍是 ready。
+            with self.store.connect(write=True) as conn:
+                self.create_generation_jobs(conn, tid, operation, task, self.scenes(conn, tid))
         self.coordinate_jobs(tid, operation, task, only_idx)
 
     def coordinate_jobs(self, tid, operation, task, only_idx=None):
@@ -780,8 +797,12 @@ class Tasks:
                         if self.scheduler.should_stop():
                             stop_dispatch, message = True, 'stopped'
                         break
-                    inflight[job_id] = self.scheduler.submit(
-                        lambda j=job_id, r=release: self.run_asset(tid, operation, j, r))
+                    try:
+                        inflight[job_id] = self.scheduler.submit(
+                            lambda j=job_id, r=release: self.run_asset(tid, operation, j, r))
+                    except BaseException:
+                        release()  # submit 失败必须归还槽位，否则全服务容量永久损失。
+                        raise
             if not inflight:
                 queued_left = [job_id for job_id, state in states.items() if state == 'queued']
                 if not queued_left:
@@ -805,12 +826,16 @@ class Tasks:
                     # 未开始执行：保持 running 由重启恢复规则处理。
                     states[job_id] = 'running'
                     stop_dispatch, message = True, 'stopped'
+                except PauseRequested:
+                    # 认领事务被暂停信号拦截并回滚：作业回到队列，转暂停收尾。
+                    states[job_id] = 'queued'
+                    stop_dispatch, message = True, 'paused'
                 except Exception as exc:
                     LOG.warning('task=%s operation=%s job=%s failed=%s', tid, operation, job_id, type(exc).__name__)
                     states[job_id] = 'failed'
                     stop_dispatch, message = True, 'failed'
-                    if failure_detail is None and isinstance(exc, HTTPException):
-                        failure_detail = str(exc.detail)
+                    if failure_detail is None:
+                        failure_detail = error_detail(exc)
         if inflight:
             wait(list(inflight.values()))
             for job_id, future in inflight.items():
@@ -852,6 +877,9 @@ class Tasks:
             task = self.task(conn, tid)
             if task['operation_id'] != operation:
                 raise RuntimeError('操作所有权失效')
+            # 暂停信号与认领在同一写事务内串行化：生效后不再有新付费请求（W4-4）。
+            if task['pause_requested']:
+                raise PauseRequested('已请求暂停，未认领新作业')
             settings = self.task_config(task, ('image',) if kind == 'img' else ())
             scene = dict(conn.execute('SELECT * FROM scenes WHERE task_id=? AND idx=?', (tid, idx)).fetchone())
             reference_records = []
@@ -925,16 +953,18 @@ class Tasks:
         references = []
         reference_context = []
         previous_context = None
-        for record in reference_records:
-            content = record['path'].read_bytes()
-            if digest(record['path']) != record['sha256']:
-                raise HTTPException(409, '固定参考图在请求前发生变化；未发起外部请求，请重新选择')
-            references.append({'mime': record['mime'], 'content': content})
-            if record['kind'] == 'fixed':
-                reference_context.append({'asset_id': record['id'], 'sha256': record['sha256']})
-            else:
-                previous_context = {'scene_id': record['scene_id'], 'asset_id': record['id'], 'sha256': record['sha256']}
+        requested = False
         try:
+            for record in reference_records:
+                content = record['path'].read_bytes()
+                if digest(record['path']) != record['sha256']:
+                    raise HTTPException(409, '固定参考图在请求前发生变化；未发起外部请求，请重新选择')
+                references.append({'mime': record['mime'], 'content': content})
+                if record['kind'] == 'fixed':
+                    reference_context.append({'asset_id': record['id'], 'sha256': record['sha256']})
+                else:
+                    previous_context = {'scene_id': record['scene_id'], 'asset_id': record['id'], 'sha256': record['sha256']}
+            requested = True
             if placeholder:
                 run_process(['ffmpeg', '-nostdin', '-v', 'error', '-n', '-f', 'lavfi', '-i',
                              'color=c=0x223344:s=640x360', '-frames:v', '1', str(temp)], 30, stopping=self.stopping)
@@ -948,8 +978,15 @@ class Tasks:
             duration = self.validator(temp, kind)
             temp.replace(output)
         except Exception as exc:
-            message = str(exc) if isinstance(exc, UserFacingError) else ('素材生成失败；生图结果可能未知，未自动重试。' if kind == 'img' else '配音生成或校验失败，请核对旁白与音色后恢复。')
-            final_state = 'unknown' if kind == 'img' and settings.image_connection[1] else 'failed'
+            # 认领之后、请求之前（参考读取、摘要复核）的失败明确记 failed；
+            # 只有已发出的请求才可能 unknown（I2，不自动重试）。
+            if requested:
+                message = str(exc) if isinstance(exc, UserFacingError) else (
+                    '素材生成失败；生图结果可能未知，未自动重试。' if kind == 'img' else '配音生成或校验失败，请核对旁白与音色后恢复。')
+                final_state = 'unknown' if kind == 'img' and settings.image_connection[1] else 'failed'
+            else:
+                message = error_detail(exc) or '请求准备失败，未发起外部请求。'
+                final_state = 'failed'
             with self.store.connect(write=True) as conn:
                 conn.execute(f'UPDATE scenes SET {kind}_state=?,{kind}_error=? WHERE task_id=? AND idx=?',
                              (final_state, message, tid, idx))
@@ -1049,8 +1086,15 @@ class Tasks:
                 raise HTTPException(503, '服务正在关闭或持久化不可用，请稍后恢复')
             try:
                 self.asset(tid, operation, idx, kind, job_id=job_id)
+            except PauseRequested:
+                self.finish_paused(tid, operation)
+                return
             finally:
                 release()
+            # 已认领的请求视为在途；完成后按暂停语义进入 interrupted（W4-4）。
+            if self.pause_requested(tid, operation):
+                self.finish_paused(tid, operation)
+                return
             self.finish(tid, operation, 'review')
         self.dispatch(tid, operation, work)
         return {'ok': True, 'operation_id': operation, 'replayed': False}

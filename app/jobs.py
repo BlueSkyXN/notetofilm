@@ -99,23 +99,6 @@ def cancel_queued(conn, operation_id, error='操作收尾，剩余队列终止�
     return cursor.rowcount
 
 
-def ready_job_ids(conn, operation_id):
-    """依赖闭包中已就绪（依赖全部终态成功）且仍 queued 的作业集合。"""
-    jobs = jobs_for_operation(conn, operation_id)
-    by_state = {job['id']: job['state'] for job in jobs}
-    ready = []
-    for job in jobs:
-        if job['state'] != 'queued':
-            continue
-        try:
-            depends_on = json.loads(job['depends_on'] or '[]')
-        except (TypeError, ValueError):
-            depends_on = []
-        if all(dep not in by_state or by_state[dep] == 'succeeded' for dep in depends_on):
-            ready.append(job['id'])
-    return ready
-
-
 def sanitize_error(message, secrets=()):
     """错误文本落库前脱敏；不持久化含凭据的供应商响应。"""
     text = str(message)
