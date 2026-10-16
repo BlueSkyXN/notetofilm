@@ -166,7 +166,7 @@ class StoryboardMigrationTests(unittest.TestCase):
                 with store.connect() as conn:
                     task = conn.execute('SELECT * FROM tasks').fetchone()
                     scene = conn.execute('SELECT * FROM scenes').fetchone()
-                    self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 9)
+                    self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 10)
                     self.assertEqual(conn.execute('SELECT COUNT(*) FROM image_assets').fetchone()[0], 0)
                     self.assertEqual((task['purpose'], task['audience'], task['focus'], task['target_duration_seconds']), ('', '', '', 0))
                     self.assertEqual((task['status'], task['video_path'], task['image_requests']), ('done', 'video.mp4', 8))

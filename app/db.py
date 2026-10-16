@@ -77,7 +77,7 @@ class Store:
     def migrate(self):
         with self.connect(write=True) as conn:
             version = conn.execute('PRAGMA user_version').fetchone()[0]
-            if version > 9:
+            if version > 10:
                 raise RuntimeError('数据库版本高于当前程序，请勿降级启动')
             conn.execute('CREATE TABLE IF NOT EXISTS tasks ('
                          'id INTEGER PRIMARY KEY AUTOINCREMENT, script TEXT NOT NULL, '
@@ -155,7 +155,27 @@ class Store:
             conn.execute('CREATE INDEX IF NOT EXISTS image_asset_task ON image_assets(task_id,id)')
             if version < 6:
                 conn.execute("UPDATE scenes SET visual_prompt=narration WHERE visual_prompt=''")
-            conn.execute('PRAGMA user_version=9')
+            # v10：素材生成作业表。历史标识不对当前 scenes 建外键——save_plan 会
+            # 先删后插镜头行，历史作业与付费台账必须保留（I12：输入快照不含凭据）。
+            conn.execute('CREATE TABLE IF NOT EXISTS jobs ('
+                         'id INTEGER PRIMARY KEY AUTOINCREMENT, '
+                         'task_id INTEGER NOT NULL REFERENCES tasks(id), '
+                         'operation_id TEXT NOT NULL, '
+                         'scene_id INTEGER NOT NULL, '
+                         'scene_index INTEGER NOT NULL, '
+                         'plan_revision INTEGER NOT NULL, '
+                         "kind TEXT NOT NULL CHECK(kind IN ('img','aud')), "
+                         "depends_on TEXT NOT NULL DEFAULT '[]', "
+                         "input_json TEXT NOT NULL DEFAULT '{}', "
+                         "input_digest TEXT NOT NULL DEFAULT '', "
+                         'expected_material_revision INTEGER, '
+                         'result_json TEXT, '
+                         "state TEXT NOT NULL CHECK(state IN ('queued','running','succeeded','failed','unknown','cancelled')), "
+                         'error TEXT, '
+                         'created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT)')
+            conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS job_identity ON jobs(operation_id,scene_id,kind)')
+            conn.execute('CREATE INDEX IF NOT EXISTS job_task ON jobs(task_id,id)')
+            conn.execute('PRAGMA user_version=10')
 
     def recover(self):
         with self.connect(write=True) as conn:
@@ -163,6 +183,16 @@ class Store:
                          ('服务中断，生图结果未知；需人工确认后重新请求，可能重复计费。',))
             conn.execute("UPDATE scenes SET aud_state='failed',aud_ok=0,aud_approved=0,aud_error=? WHERE aud_state='running'",
                          ('服务中断，请重新生成配音。',))
+            # 作业恢复与镜头恢复同一规则：生图 unknown、配音 failed；未派发的
+            # 队列终止。重启不自动继续旧队列，由人工恢复创建新操作。
+            conn.execute("UPDATE jobs SET state='unknown',error=?,finished_at=? "
+                         "WHERE state='running' AND kind='img'",
+                         ('服务中断，生图结果未知；需人工确认后重新请求，可能重复计费。', now()))
+            conn.execute("UPDATE jobs SET state='failed',error=?,finished_at=? "
+                         "WHERE state='running' AND kind='aud'",
+                         ('服务中断，请重新生成配音。', now()))
+            conn.execute("UPDATE jobs SET state='cancelled',error=?,finished_at=? WHERE state='queued'",
+                         ('服务重启，旧队列终止；恢复会创建新操作。', now()))
             conn.execute("UPDATE tasks SET status='interrupted',error=? WHERE operation_id IS NOT NULL "
                          "OR status IN ('submitted','generating','rendering')",
                          ('服务中断，已有成功素材保留，请核对后恢复。',))

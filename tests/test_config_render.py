@@ -71,7 +71,7 @@ class ConfigTests(unittest.TestCase):
             store.open()
             try:
                 with store.connect() as conn:
-                    self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 9)
+                    self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 10)
                     self.assertEqual(conn.execute('SELECT purpose,audience,focus,target_duration_seconds FROM tasks').fetchone()[:], ('', '', '', 0))
                     self.assertEqual(conn.execute('SELECT COUNT(*) FROM image_requests').fetchone()[0], 0)
                     self.assertEqual(conn.execute('SELECT script,status,video_path FROM tasks').fetchone()[:], ('keep', 'done', 'video.mp4'))

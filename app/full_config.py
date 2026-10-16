@@ -16,7 +16,11 @@ REFERENCES = {'shared': 'OPENAI_API_KEY', 'llm': 'LLM_API_KEY', 'image': 'IMAGE_
 LIMITS = ('max_active', 'max_render', 'max_script', 'max_scenes', 'max_narration', 'render_timeout',
           'max_image_requests', 'min_free_mb', 'max_audio_seconds', 'max_video_seconds', 'max_daily_tasks',
           'max_visitor_tasks', 'max_daily_llm', 'max_daily_images', 'max_daily_audio', 'max_daily_renders',
-          'request_body_timeout', 'max_upload_image_bytes', 'max_image_pixels')
+          'request_body_timeout', 'max_upload_image_bytes', 'max_image_pixels',
+          'image_concurrency', 'audio_concurrency', 'task_inflight')
+# v0.4 新增的并发限制：schema_version 保持 1，旧完整配置缺失这些键时在
+# 校验前补默认值；其余原有字段缺失、未知字段或错误类型仍报错。
+CONCURRENCY_DEFAULTS = {'image_concurrency': 1, 'audio_concurrency': 2, 'task_inflight': 3}
 SECRET_FIELDS = (('credentials', 'shared'), ('credentials', 'llm'), ('credentials', 'image'),
                  ('server', 'admin_token'), ('server', 'webhook'), ('storage', 'hf_token'))
 SERVER_FIELDS = {'admin_token': str, 'local_only': bool, 'cookie_secure': bool, 'allowed_hosts': list, 'webhook': str}
@@ -79,11 +83,27 @@ def redacted(document):
     return result
 
 
+def normalize_limits(document):
+    """为缺失的并发限制补默认值；不回写文件，不影响版本校验。
+
+    只补 CONCURRENCY_DEFAULTS 中缺失的键；原有字段缺失、未知字段或
+    错误类型仍由 validate_full 报错。所有配置入口共用这一个函数。
+    """
+    limits = document.get('limits') if isinstance(document.get('limits'), dict) else None
+    if limits is None:
+        return document
+    for name, default in CONCURRENCY_DEFAULTS.items():
+        if name not in limits:
+            limits[name] = default
+    return document
+
+
 def validate_full(document, path, space_host=''):
     from .model_config import ModelConfig, SCHEMA, encode
     expected = {'schema_version', 'server', 'storage', 'credentials', 'limits', 'llm', 'image', 'tts'}
     if set(document) != expected or type(document['schema_version']) is not int or document['schema_version'] != 1:
         raise ValueError('需要完整的 schema_version = 1 配置文件')
+    normalize_limits(document)
     sections = {'server': SERVER_FIELDS, 'storage': STORAGE_FIELDS,
                 'credentials': {name: str for name in REFERENCES}, 'limits': {name: int for name in LIMITS}}
     for name in ('llm', 'image', 'tts'):
