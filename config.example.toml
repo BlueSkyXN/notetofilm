@@ -1,0 +1,63 @@
+# 复制到 config/config.toml 后填写管理员令牌、模型网关与密钥。
+# HF bucket 模式填写 storage 中的两个 bucket ID 和访问凭据。
+schema_version = 1
+
+[server]
+admin_token = ""
+local_only = false
+cookie_secure = false
+allowed_hosts = ["127.0.0.1", "localhost", "::1"]
+webhook = ""
+
+[storage]
+work_dir = "../data"
+local_backup_dir = ""
+config_bucket = ""
+data_bucket = ""
+hf_token = ""
+
+[credentials]
+shared = ""
+llm = ""
+image = ""
+
+[limits]
+max_active = 3
+max_render = 1
+max_script = 20000
+max_scenes = 30
+max_narration = 2000
+render_timeout = 1800
+max_image_requests = 60
+min_free_mb = 256
+max_audio_seconds = 180
+max_video_seconds = 900
+max_daily_tasks = 20
+max_visitor_tasks = 5
+max_daily_llm = 40
+max_daily_images = 60
+max_daily_audio = 120
+max_daily_renders = 30
+request_body_timeout = 30
+max_upload_image_bytes = 10485760
+max_image_pixels = 24000000
+
+[llm]
+base_url = ""
+model = "origin-deepseek-v4-1-flash"
+wire_api = "chat"
+credential_ref = "shared"
+
+[image]
+base_url = ""
+model = "gpt-image-2.5-sunburst"
+size = "1024x768"
+quality = "low"
+timeout_seconds = 300
+style = "扁平插画风格，蓝白主色调，简洁构图，画面中不出现文字"
+reference_protocol = "none"
+credential_ref = "shared"
+
+[tts]
+provider = "edge-tts"
+voice = "zh-CN-YunxiNeural"

@@ -48,88 +48,106 @@ FastAPI、SQLite、本地文件与 FFmpeg；单容器、单应用进程，无需
 
 ## 本地启动
 
-需要 Python 3.11、ffmpeg/ffprobe（含 libx264）。目前进程锁和子进程管理支持 Linux/macOS；Windows 请使用 Linux 容器或 WSL。
+需要 Python 3.11、ffmpeg/ffprobe（含 libx264）。进程锁和子进程管理支持 Linux/macOS；Windows 请使用 Linux 容器或 WSL。
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-# 在终端环境中设置 ADMIN_TOKEN（兼容旧 ACCESS_TOKEN）；不要把真实令牌提交到 Git。
+mkdir -p config data
+cp -n config.example.toml config/config.toml
+chmod 600 config/config.toml
+# 编辑 config/config.toml，填写 server.admin_token、模型网关和 credentials。
 .venv/bin/uvicorn app.app:app --host 127.0.0.1 --port 8765 --no-proxy-headers
 ```
 
-打开 http://127.0.0.1:8765 即可使用。访客任务绑定当前浏览器 Cookie，30 天到期、清除 Cookie 或更换设备后无法找回；管理员仍可查看。`/admin` 是静态配置面板，浏览器调用管理员 API 时若未登录会跳转到 `/login`。管理员使用 POST 登录与 12 小时签名 HttpOnly Cookie；API 管理员可用 `X-Access-Token`，不接受 URL token。旧版 `ntf_session` 不升级为管理员会话，需重新登录。
+打开 http://127.0.0.1:8765 即可使用。访客任务绑定当前浏览器 Cookie，30 天到期、清除 Cookie 或更换设备后无法找回；管理员仍可查看。`/admin` 提供配置管理，管理员通过 POST 登录与 12 小时签名 HttpOnly Cookie 访问；API 管理员也可用 `X-Access-Token`，不接受 URL token。
 
-若只在本机试验，可显式设置 `ALLOW_UNAUTHENTICATED_LOCAL=1` 并不配令牌。程序仍会检查请求来源为回环地址；不要在这种模式前面加远程反向代理。无管理员令牌且未显式允许本机模式时，启动失败。本机匿名演示只开放访客功能，不能绕过管理员登录进入设置。
-
-未配置模型网关时，分镜按**空行**分段，图片生成纯色占位，配音仍访问 edge-tts。全部选用已导入图片的任务不请求生图；仍需可用的配音服务才能合成。自动化测试使用本地夹具，不调用 edge-tts。
+本机演示可在文件中设置 `server.local_only = true` 并留空管理员令牌。此模式只接受回环请求、只开放访客功能；远程部署需要管理员令牌。未配置模型网关时，分镜按空行分段，图片生成纯色占位，配音仍访问 edge-tts。全部选用已导入图片时不请求生图，仍需可用的配音服务。
 
 ## Docker
 
-复制 `.env.example` 为未纳入 Git 的 `.env`，生成并填入随机 `ADMIN_TOKEN`（兼容 `ACCESS_TOKEN`），配置需要的网关参数。示例文件不包含真实令牌。仅 Docker Compose 自动读取 `.env`；本地 uvicorn 使用终端导出的环境变量。
+先按上节准备完整的 `config/config.toml`，然后运行：
 
 ```bash
 docker compose config --quiet
 docker compose up -d --build
 ```
 
-- `ADMIN_TOKEN` 与 `ACCESS_TOKEN` 均缺少或留空时，Compose 会报错。
-- 默认只发布到 `127.0.0.1:8765`。远程访问通过受控 HTTPS 反向代理或 SSH 隧道；HTTPS 部署时设置 `COOKIE_SECURE=1`，把实际访问域名加入 `ALLOWED_HOSTS`，反向代理保留原始 Host。
-- 数据持久化到 `./data`，提供 `/healthz` 健康检查。应用只能单进程运行。容器以 UID/GID `1000:1000` 运行，Linux 主机需预先创建目录并赋予对应用户写权限，例如 `mkdir -p data && sudo chown 1000:1000 data`；已有数据先备份、确认归属后再调整权限。
-- 镜像构建会运行离线回归及真实 FFmpeg 测试，失败则停止构建。模型请求和 edge-tts 联通性仍需在实际运行环境另行验证。
+Compose 分别挂载 `./config:/svc/config` 和 `./data:/svc/data`，无需业务环境变量或 `.env`。配置内默认 `storage.work_dir = "../data"`，相对于配置文件目录解析。默认只发布到 `127.0.0.1:8765`；HTTPS 反向代理部署时在文件中设置 `server.cookie_secure = true` 并把实际域名加入 `server.allowed_hosts`。
+
+容器使用 UID/GID `1000:1000`，Linux 主机应为两个目录设置对应写权限；已有内容先备份再调整权限。镜像构建运行离线回归和真实 FFmpeg 测试。`/healthz` 提供健康检查，应用保持单进程。
 
 ## Hugging Face Docker Space
 
-使用同一 Dockerfile，CPU Basic 即可，无需 GPU。创建时选择 `Docker`、`cpu-basic` 与 `Protected`；Protected 隐藏源码，但应用地址依然可能被任何人访问，**不能保护公开业务接口；仅管理员设置需要令牌登录**。
+使用同一 Dockerfile、CPU Basic 和单副本。`Protected` 只隐藏源码，应用接口仍按访客或管理员权限访问。Space 内嵌页提供新窗口入口，业务页使用第一方 Cookie。HF 注入的 `SPACE_HOST` 自动加入允许域名并启用 Secure Cookie。
 
-- 在 **Settings → Variables and secrets → Secrets** 设置 `ADMIN_TOKEN`（兼容现有 `ACCESS_TOKEN`，建议随机 32 字节以上）。首次启动可从环境迁移模型配置：共用网关时设置 `OPENAI_BASE` + `OPENAI_API_KEY`；分开时设置 `LLM_BASE` + `LLM_API_KEY`、`IMAGE_BASE` + `IMAGE_API_KEY`。不要使用示例 key，不在 README、Variables 或提交记录保存真实凭据。
-- 非敏感设置可用 Variables：`TTS_VOICE=zh-CN-YunxiNeural`、`MAX_ACTIVE_TASKS=2`、`MAX_RENDER_TASKS=1`，以及网关实际支持的 `LLM_MODEL`、`IMAGE_MODEL`、`IMAGE_SIZE`。
-- HF 注入 `SPACE_HOST` 后，程序自动加入该确切域名并强制 Secure Cookie。端口为 `8765`，README 的 `app_port` 已匹配；不要开启多副本或多 worker。
-- Space 内嵌页只显示入口，点击「新窗口打开」直接使用工作台，管理员通过 `/admin` 登录。业务页仍禁止嵌入，不依赖第三方 Cookie，也不放宽跨站付费操作限制。
-- **本配置未购买持久化存储**。SQLite、图片、音频与视频位于容器临时盘，重启、休眠或重建可能丢失。成片及时下载；需要长期保存时使用自托管持久化磁盘，不直接把 SQLite/进程锁放到未经验证的对象存储挂载上。
-- edge-tts 无需单独 API key，但旁白会发送到微软服务；HF 出网是否可用需实际验证。未配置模型网关时只能空行分镜和占位图，不能导出正式成片。
-- HF Secrets 写入后不可回读原值。管理员可在 Settings 替换 `ADMIN_TOKEN` / `ACCESS_TOKEN`；修改会使现有管理员及访客 Cookie 失效，并可能触发 Space 重启。旧访客任务仍保留在管理员列表（前提是数据盘未丢失）。
+新部署使用两个**私有 bucket**：
+
+| 存储 | 内容与用途 |
+|---|---|
+| config bucket | `config.toml` 和 `config.previous.toml`；包含管理员令牌、模型与 HF 访问密钥、网关、模型参数、额度及运行设置的完整明文配置 |
+| data bucket | SQLite 一致性快照、任务与所有者、请求额度、版本化图音、已发布成片和清单；对象按 SHA-256 去重 |
+| 容器本地 `work_dir` | SQLite 运行库、素材工作副本、FFmpeg 临时文件；重建后从 data bucket 恢复 |
+
+创建 bucket 后，将完整配置上传到 config bucket。文件中的 `storage.config_bucket`、`storage.data_bucket` 填写各自的 `namespace/name`，`storage.hf_token` 填写有权读写这两个私有 bucket 的凭据，`storage.work_dir` 使用 `/svc/data`。真实文件只保存在私有位置，仓库只包含无密钥的示例。
+
+以下命令用于新 Space；`volumes set` 会替换挂载列表，已有 Space 需要保留其原有挂载：
+
+```bash
+hf buckets create username/notetofilm-config --private
+hf buckets create username/notetofilm-data --private
+hf buckets cp config/config.toml hf://buckets/username/notetofilm-config/config.toml
+hf spaces volumes set username/notetofilm \
+  -v hf://buckets/username/notetofilm-config:/mnt/notetofilm-config:ro
+```
+
+应用从 `/mnt/notetofilm-config/config.toml` 取得存储连接信息，随后通过官方客户端直接读写 config bucket，并确认远端保存结果。data bucket 同样通过客户端保存快照，无需挂载；SQLite 始终运行在本地目录。配置文件包含完整参数，运行时不再读取模型、密钥或额度环境变量。`NOTETOFILM_CONFIG_FILE` 仅用于选择非默认文件路径；`SPACE_HOST` 属于平台提供的访问域名。
+
+bucket 不可访问、恢复校验失败或写入未确认时停止启动或返回 503；运行中发生持久化故障后暂停新增操作，检查配置和网络后重启恢复。模型请求前先确认额度与操作状态已保存。单实例仍是必要条件：不同容器没有共享进程锁，不支持两个实例同时写入同一 data bucket。
+
+### 从旧环境配置迁移
+
+本地部署可以在**旧环境变量仍可读取**的终端执行一次导入：
+
+```bash
+.venv/bin/python scripts/migrate_config.py --data-dir data --output config/config.toml
+```
+
+目标文件必须不存在。导入读取旧 `data/config.toml` 的模型设置及现有环境中的密钥、管理员令牌、额度；保留旧配置和全部任务文件。停止旧进程后使用完整配置启动。已有完整文件时，旧业务环境变量会被忽略；无须为切换配置方式轮换任何密钥。继续显式使用旧 `VIDEO_DATA_DIR` 且没有独立配置文件的启动脚本仍走兼容模式；要迁移应指定或创建完整配置文件。
+
+旧 HF Secrets 无法回读时，可先向私有 config bucket 放入一次性引导文件：
+
+```toml
+bootstrap_from_environment = true
+
+[storage]
+work_dir = "/svc/data"
+local_backup_dir = ""
+config_bucket = "username/notetofilm-config"
+data_bucket = "username/notetofilm-data"
+hf_token = "<仅在私有文件中填写实际凭据>"
+```
+
+首次新版本启动会在容器内读取现有环境，将引导文件替换为完整配置；后续启动直接读取完整文件。**此步骤只迁移配置，不会把已消失的旧容器临时盘带回。** 旧 HF 临时盘部署必须先取得完整数据库和媒体备份，再进行会重建容器的升级或挂载变更。仅下载视频或导出模型 TOML 不足以恢复任务、所有者和额度。
 
 ## 配置
 
-首次启动把环境中的模型参数迁移为 `data/config.toml`（0600）；已有文件优先，后续模型环境参数不覆盖面板修改。API key 永远由环境 / Secrets 解析，允许仅配置 key，再由面板配置地址。部署安全设置和额度仍由环境控制。
+完整示例见 [config.example.toml](config.example.toml)，所有字段均有默认值或空值占位。文件路径按 `NOTETOFILM_CONFIG_FILE`、HF 默认挂载、仓库 `config/config.toml` 的顺序选择。已有文件格式错误时启动失败，不退回环境变量覆盖它。
 
-| 参数 | 默认值 / 用途 |
+| 分节 | 主要内容 |
 |---|---|
-| `ADMIN_TOKEN` / `ACCESS_TOKEN` | 管理员令牌；新名称优先，兼容原 HF Secret |
-| `ALLOW_UNAUTHENTICATED_LOCAL` | `0`；仅本机演示可显式设 `1`，Compose 不开启此选项 |
-| `COOKIE_SECURE` | `0`；HTTPS 部署设 `1` |
-| `ALLOWED_HOSTS` | `127.0.0.1,localhost,::1`；远程域名需显式加入，不允许通配符 |
-| `LLM_BASE` / `LLM_API_KEY` | 可选独立聊天网关；首次迁移时与地址配套，留空回退至 OPENAI 配置 |
-| `IMAGE_BASE` / `IMAGE_API_KEY` | 可选独立生图网关；首次迁移时与地址配套，留空回退至 OPENAI 配置 |
-| `OPENAI_BASE` | 空；带 API 前缀的 HTTPS 网关地址，仅默认或 443 端口，例如 `https://gateway.example/v1` |
-| `OPENAI_API_KEY` | 空；只用于密钥引用，不写入 TOML |
-| `LLM_MODEL` | `origin-deepseek-v4-1-flash`；须按网关能力设置 |
-| `LLM_WIRE_API` | `chat`；首次配置选择 `chat`（Chat Completions）或 `responses`（Responses API），后续以 TOML 为准 |
-| `IMAGE_MODEL` | `gpt-image-2.5-sunburst`；须按网关能力设置 |
-| `IMAGE_SIZE` | `1024x768`；须与图片接口契约匹配 |
-| `IMAGE_REFERENCE_PROTOCOL` | `none`；设为 `openai-images-edit` 时，新任务的固定参考走 Images Edit multipart。协议随任务快照冻结 |
-| `IMAGE_TIMEOUT` | `300` 秒；单次图片接口 HTTP 请求总时限，图片下载另限 60 秒 |
-| `STYLE_PRESET` | 简洁蓝白扁平插画，不包含文字 |
-| `TTS_VOICE` | `zh-CN-YunxiNeural` |
-| `FEISHU_WEBHOOK` | 空；可选，只发送任务编号和状态 |
-| `VIDEO_DATA_DIR` | `data/`；Compose 固定使用挂载的数据目录 |
-| `MAX_ACTIVE_TASKS` | `3`；包括规划、生成、重做、恢复、合成的在途操作总量 |
-| `MAX_RENDER_TASKS` | `1`；不能大于总容量 |
-| `MAX_SCRIPT_CHARS` | `20000`；文稿和旁白总长度上限；普通请求体字节上限为该值 × 6 + 196608，编辑计划另计画面描述额度 |
-| `MAX_UPLOAD_IMAGE_BYTES` | `10485760`；每张任务内上传 PNG/JPEG 的字节上限 |
-| `MAX_IMAGE_PIXELS` | `24000000`；上传图片解码后的像素上限 |
-| `REQUEST_BODY_TIMEOUT` | `30` 秒；接收完整请求体的总期限，不随分块重置 |
-| `MAX_SCENES` | `30`；超限报错，不再截断 |
-| `MAX_NARRATION_CHARS` | `2000`；单镜旁白长度上限 |
-| `RENDER_TIMEOUT` | `1800` 秒；超时终止整个渲染进程组 |
-| `MAX_IMAGE_REQUESTS_PER_TASK` | `60`；初次、重做和失败生图请求合计上限，不代表金额预算 |
-| `MIN_FREE_DISK_MB` | `256`；低于此值拒绝新操作，仍需管理员监测长任务过程中的磁盘 |
-| `MAX_AUDIO_SECONDS` | `180`；单镜音频媒体校验上限 |
-| `MAX_VIDEO_SECONDS` | `900`；合成前旁白总时长上限 |
+| `server` | 管理员令牌、本机模式、Cookie、允许域名、通知 webhook |
+| `storage` | 本地运行目录、可选本地快照目录、两个私有 bucket、HF 访问密钥 |
+| `credentials` | `shared`、`llm`、`image` 三个明文模型密钥条目 |
+| `limits` | 并发、请求体、场景数、素材尺寸、时长、磁盘下限、每日调用额度 |
+| `llm` / `image` | 网关、模型、接口协议及 `credential_ref`；引用上述三个密钥条目之一 |
+| `tts` | `edge-tts` 与音色，默认 `zh-CN-YunxiNeural` |
+
+本地可选 `storage.local_backup_dir` 作为独立持久目录，使用与 bucket 相同的快照协议；它与 `data_bucket` 二选一，且不得位于 `work_dir` 内。完整配置始终放在运行目录之外，任务快照只保存模型参数和密钥引用。
 
 兼容范围是 **Chat Completions / Responses 文本分镜＋Images generations**。`[llm].wire_api="chat"` 调用 `/chat/completions`；`"responses"` 调用 `/responses`，使用非流式请求、`store=false`，从完成响应的 assistant `output_text` 内容提取完整分镜，跳过推理项并拒绝未完成、拒绝或无文本结果。Responses 分支不强加 `temperature`；不自动切换协议或重试模型调用。旧 TOML 与历史任务快照省略 `wire_api` 时继续使用 `chat`。
 
-聊天与生图默认共用 OPENAI base/key，也可分别配置独立网关；Images 必须支持配置的模型、尺寸及所选 `quality`（默认 low），并返回 base64 或 HTTPS 图片地址。请求使用 `NoteToFilm/1.0` 客户端标识。适配层在 `app/providers.py`，兼容并不代表所有网关接受全部参数。管理员表单与高级 TOML 编辑器共用配置，支持分别设置网关、协议、模型、尺寸、质量、超时和音色；Bearer token 仍通过 `OPENAI_API_KEY` / `LLM_API_KEY` / `IMAGE_API_KEY` 注入，不写入 TOML。
+聊天与生图可以共用 `credentials.shared`，也可分别配置网关及密钥条目；Images 必须支持配置的模型、尺寸及所选 `quality`（默认 low），并返回 base64 或 HTTPS 图片地址。请求使用 `NoteToFilm/1.0` 客户端标识。适配层在 `app/providers.py`，兼容并不代表所有网关接受全部参数。管理员表单与高级 TOML 编辑器共用配置，支持分别设置网关、协议、模型、尺寸、质量、超时和音色；Bearer token 从完整文件的 `credentials` 分节按引用解析。
 
 分镜模型输出 `[{"narration":"旁白","visual_prompt":"具体画面描述"}]`，同时兼容旧字符串数组；未配置 LLM 时仍按空行分段，并先以旁白填充画面描述供用户修改。单镜画面描述上限为 4000 字符，旁白继续使用现有长度限制。生图只使用统一风格、任务画幅和画面描述，配音只使用旁白。请求图片尺寸仍以模型配置为准；实际返回比例不符时，由预览与合成按任务的适配方式处理。
 
@@ -145,36 +163,33 @@ docker compose up -d --build
 
 工作台并列展示文稿输入与任务列表，任务摘要取首镜旁白或原稿前 60 字。任务页按分镜确认、图音复核、处理中、失败/中断及完成状态显示当前动作；分镜修改未保存时禁止生成，草稿暂存在当前标签页的 sessionStorage，刷新后恢复且仍检查原版本，不自动覆盖服务端修改。图音生成后可返回编辑分镜，保存后再次确认生成，只补齐缺失素材。配音就绪后显示各镜实际时长、总时长与上限，超限时按时长列出可定位修改的镜头，并禁止合成；服务端也会在认领渲染额度前拒绝已知超限。旧素材未记录时长时仍在实际编码前校验。完成后可直接播放视频，或使用独立下载接口保存 MP4。
 
-页面不使用浏览器原生确认框或离开页面弹窗。「确认分镜，生成图音」按页面列出的数量直接执行；重做图片、需再次授权的恢复、归档及丢弃草稿使用页面内确认按钮，可取消。配置草稿也只暂存在当前标签页，保存或退出管理员后清除；关闭标签页可能丢失草稿，暂存失败时页面会提示先保存。
+页面不使用浏览器原生确认框或离开页面弹窗。「确认分镜，生成图音」按页面列出的数量直接执行；重做图片、需再次授权的恢复、归档及丢弃草稿使用页面内确认按钮，可取消。完整配置的草稿只保留在页面内存中，避免把新输入的密钥存入浏览器持久存储；保存、退出或关闭页面后清除。
 
 所有页面共用明暗主题。优先使用已保存偏好，否则跟随系统；主题开关可随时切换。手机端按内容顺序排列，不提供与实际任务无关的占位预览。
 
 ## 管理员配置面板
 
-`/admin` 提供常用配置表单与高级 TOML 编辑、校验、保存并应用、恢复上一版与导出。两种编辑方式共用草稿与版本检查；直接编辑 TOML 后先校验再同步表单，使用表单会规范化 TOML 并去除注释。只有管理员可以读取或写入配置；访客响应不包含网关地址、密钥引用或完整配置快照。
+`/admin` 提供模型与密钥表单、高级完整 TOML、校验、保存、恢复上一版和导出。直接编辑 TOML 后可先校验再保存，保存后表单重载；表单编辑会规范化格式并去除注释。
 
-- `[llm]`：`base_url`、`model`、`api_key_env`、`wire_api`（`chat` / `responses`；旧配置可省略）。
-- `[image]`：`base_url`、`model`、`api_key_env`、`size`、`quality`、`timeout_seconds`、`style`、`reference_protocol`。
-- `[tts]`：`provider="edge-tts"`、`voice`。
-- `api_key_env` 只允许 `OPENAI_API_KEY`、`LLM_API_KEY`、`IMAGE_API_KEY`；不能借此读取管理员令牌或任意环境变量。真实 key 不下发浏览器，只显示已配置状态。
-- 网关使用无凭据、无查询参数的 HTTPS 443 地址。更换网关或密钥引用必须再次确认授权绑定，避免无意把旧密钥发往新服务。
-- 保存前做语法、字段、类型、限值和密钥检查；使用版本冲突检查、原子替换、`config.previous.toml` 备份。非法配置不替换生效版本，磁盘被外部修改时拒绝覆盖。
-- 保存无需重启，只影响新任务；每个任务持久保存无密钥的配置快照。旧任务继续使用旧模型、地址和音色，不会静默切到新网关。密钥不冻结；移除旧 key 后，历史详情、已完成视频下载、本地合成和已有成片恢复仍可用，只有确实需要调用对应供应商时才要求恢复兼容密钥。已存在的合法 TOML 可以在模型密钥暂时缺失时启动；首次配置迁移及保存新配置仍要求所引用密钥存在。
-- 校验、保存、恢复不触发模型调用；不把语法校验宣称为真实供应商联通性验证。
-- Docker 挂载 `data` 即保留配置。HF 当前临时盘上的配置会丢失，面板明确提示并支持导出；恢复时可粘贴导出文本，或自托管启动前放入 `data/config.toml`。不自动写 HF 仓库，不新增 HF 写权限凭据。
+- 普通读取与校验把密钥、管理员令牌、webhook、HF token 显示为 `__UNCHANGED__`。保留该值沿用现有内容，填新值替换，清空移除；只有明确执行完整导出才返回全部明文。
+- 网关使用不含凭据和查询参数的 HTTPS 443 地址。更换网关或密钥条目时，需确认新绑定有权接收所选密钥与文稿。
+- 保存检查版本冲突，先备份上一版，再保存并回读确认。外部改动不会被旧页面覆盖；写入失败后需检查存储并重启。
+- 模型参数用于新任务；旧任务保留自己的模型、地址和音色。密钥更新用于后续请求。移除密钥后，已有视频下载与本地合成仍可用，需要模型的操作返回缺少凭据错误。
+- `server`、`limits`、`storage` 变更在保存后显示需重启。更换 bucket 或运行目录前，应停机迁移并验证对应配置和数据快照；单纯修改名称不会复制存量数据。
+- 校验、保存和恢复配置不调用模型。旧版只含模型三节的 API 写入仍被接受，会保留完整文件中的密钥与运行设置。
 
 ## 公开使用额度
 
 SQLite 事务内按 UTC 日计数；失败、未知请求也计入。不是金额预算，也不是防机器人系统。管理员与所有访客共享全局额度，归档和换 Cookie 不解除全局额度。
 
-| 环境变量 | 默认上限 / UTC 日 |
+| `limits` 配置键 | 默认上限 / UTC 日 |
 |---|---|
-| `MAX_DAILY_TASKS` | 全服务 20 个新任务 |
-| `MAX_VISITOR_DAILY_TASKS` | 每个访客 5 个新任务 |
-| `MAX_DAILY_LLM_REQUESTS` | 全服务 40 次分镜模型请求 |
-| `MAX_DAILY_IMAGE_REQUESTS` | 全服务 60 次生图请求 |
-| `MAX_DAILY_AUDIO_REQUESTS` | 全服务 120 次配音请求 |
-| `MAX_DAILY_RENDER_REQUESTS` | 全服务 30 次合成操作 |
+| `max_daily_tasks` | 全服务 20 个新任务 |
+| `max_visitor_tasks` | 每个访客 5 个新任务 |
+| `max_daily_llm` | 全服务 40 次分镜模型请求 |
+| `max_daily_images` | 全服务 60 次生图请求 |
+| `max_daily_audio` | 全服务 120 次配音请求 |
+| `max_daily_renders` | 全服务 30 次合成操作 |
 
 额度在实际请求前认领，中途耗尽会停止任务并保留已完成素材。任务的单独上限、总并发和磁盘限制仍然生效。历史无所有者任务迁移为管理员所有，不公开给访客。
 
@@ -184,7 +199,9 @@ SQLite 事务内按 UTC 日计数；失败、未知请求也计入。不是金�
 app/app.py          服务生命周期、安全中间件与静态前端入口
 app/api.py          API v1 路由、鉴权依赖与文件出口
 app/schemas.py      请求/响应契约与 OpenAPI schema
-app/config.py       部署环境与初始配置
+app/config.py       运行设置与旧环境兼容入口
+app/full_config.py  完整配置、一次性导入、遮蔽与远端保存
+app/persistence.py  私有 bucket 客户端、SQLite 快照与恢复
 app/model_config.py TOML 校验、原子写入、热应用与任务快照
 app/auth.py         匿名访客 Cookie 与任务身份
 app/db.py           数据迁移、事务、单进程锁、启动恢复
@@ -214,7 +231,9 @@ vendor/compose_video.py  独立 manifest 渲染引擎
 
 归档只改变任务状态，不释放磁盘。磁盘不足时由管理员先备份再清理或迁移存储；本程序不自动删除历史素材。
 
-**升级前停服务并备份整个 data 目录。** 数据库迁移后不建议直接降级；回退应使用完整的迁移前备份。重启恢复不会自动发起付费调用。当前不自动清理历史素材和失败尝试，管理员需要监控磁盘并安排停机备份与人工归档。
+接入快照存储后，每次数据库写入先在本地提交，通过 SQLite backup API 生成一致性副本，再上传数据库、已发布图音和成片；不可变对象完成后，最后发布 `latest.json`。启动先下载并校验全部文件摘要与数据库，再恢复运行目录。未发布的快照和 `.part` 文件不会作为恢复源，旧版图音保留。写入失联后保留本地文件并停止新操作；恢复使用最后确认的快照，结果未知的生图仍要求人工确认。快照按内容去重，旧对象暂不自动清理，需要监测 bucket 容量。
+
+**升级前停服务并备份完整配置与整个 data 目录，或核验最新远端快照可恢复。** 数据库迁移后不建议直接降级；回退应使用完整的迁移前备份。重启恢复不会自动发起付费调用。当前不自动清理历史素材和失败尝试，管理员需要监控磁盘并安排停机备份与人工归档。
 
 ## 验证
 
@@ -236,7 +255,7 @@ node --test tests/test_review_helpers.mjs
 - 模型是否忠实覆盖原稿仍需用户在分镜确认页核对；数量和长度校验无法证明语义完整。
 - 支持独立编辑旁白与画面描述、复用未改动素材，以及按输出画幅连续预览。已完成任务可“修改为新版本”，旧 MP4 保留下载；“复制为新草稿”会复制原文、旁白、画面描述和制作要求，图片与参考需重新选择。当前未提供完整项目状态回滚或拖拽时间线编辑。
 - 2fps 低成本合成存在帧边界舍入；真实播放效果和换镜节奏需要业务验收。
-- 访客 Cookie 不是实名身份；清 Cookie 可绕过单访客额度，但不能绕过持久数据库中的全局额度。额度耗尽可造成他人无法使用；HF 临时盘丢失会重置计数，上游还必须设置费用预算。
-- API key 仅从环境读取；网关错误不把原始响应写给用户。已分类的 HTTP 状态、超时、配音及媒体错误提供固定处理建议；日志记录任务/操作编号和安全错误码，未知异常仍只记录类型，不输出原始响应、地址或凭据。
+- 访客 Cookie 不是实名身份；清 Cookie 可绕过单访客额度，但不能绕过持久数据库中的全局额度。额度耗尽可造成他人无法使用；未接入持久化时临时盘丢失会重置计数，接入后计数随数据库恢复。
+- 完整配置中的明文密钥仅供管理员管理；网关错误不把原始响应写给用户。已分类的 HTTP 状态、超时、配音及媒体错误提供固定处理建议；日志记录任务/操作编号和安全错误码，未知异常仍只记录类型，不输出原始响应、地址或凭据。
 - edge-tts 没有企业 SLA，文本会发往微软端点；网关配置不代表模型处理一定在内网。
 - LICENSE 暂未添加，默认保留所有权利，沿用当前发布决定。

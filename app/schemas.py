@@ -254,6 +254,8 @@ class ModelSettings(BaseModel):
     ephemeral: bool
     storage: str
     external_change: bool
+    complete_config: bool = False
+    restart_required: list[str] = Field(default_factory=list)
 
 
 class ConfigValidation(Ok):

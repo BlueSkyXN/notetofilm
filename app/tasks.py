@@ -18,6 +18,7 @@ from .image_assets import validate_and_normalize
 from .render import Renderer, digest, duration_error, run_process, validate_asset
 from .errors import UserFacingError
 from .layout import video_layout
+from .persistence import DirectoryBucket, HFBucket, Snapshots
 
 LOG = logging.getLogger('notetofilm.tasks')
 
@@ -25,7 +26,8 @@ LOG = logging.getLogger('notetofilm.tasks')
 class Tasks:
     def __init__(self, config, providers=None, renderer=None, executor=None, validator=validate_asset):
         self.config = config
-        self.store = Store(config.data)
+        bucket = HFBucket(config.data_bucket, config.hf_token) if config.data_bucket else DirectoryBucket(config.backup_dir) if config.backup_dir else None
+        self.store = Store(config.data, Snapshots(bucket) if bucket else None)
         self.providers = providers or Providers(config)
         self.injected_provider = providers is not None
         self.models = ModelConfig(config)
@@ -38,6 +40,10 @@ class Tasks:
             self.providers.stopping = self.stopping
         if hasattr(self.renderer, 'stopping'):
             self.renderer.stopping = self.stopping
+
+    @property
+    def storage_failed(self):
+        return self.store.failure or bool(self.models.file_config and self.models.file_config.failure)
 
     def open(self):
         self.config.validate()
@@ -219,7 +225,8 @@ class Tasks:
             self.fail(tid, operation, str(exc.detail))
         except UserFacingError as exc:
             LOG.error('task=%s operation=%s code=%s', tid, operation, exc.code)
-            self.fail(tid, operation, str(exc))
+            if not self.store.failure:
+                self.fail(tid, operation, str(exc))
         except Exception as exc:
             LOG.error('task=%s operation=%s failed=%s', tid, operation, type(exc).__name__)
             self.fail(tid, operation, '处理失败，已有成功素材保留；请检查配置、素材状态后恢复。')

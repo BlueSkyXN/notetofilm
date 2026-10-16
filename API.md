@@ -12,7 +12,7 @@ All business functions use `/api/v1`. HTML/CSS/JavaScript are static clients: no
 
 Anonymous users do not log in. A client first calls `GET /api/v1/session`, then preserves `ntf_visitor` in its cookie jar. The signed HttpOnly cookie identifies the visitor and expires after 30 days. Clearing it or switching devices loses access to the visitor's existing tasks. All task metadata, writes and media downloads enforce ownership; another visitor receives 404. An HTML shell being public does not grant access to its task data.
 
-Administrators call `POST /api/v1/auth/login` with `{"token":"<administrator token>"}` and retain `ntf_admin`, or send `X-Access-Token`. Obtain this token from your secret manager; do not put it in a URL, checked-in client, example file or command history. `POST /api/v1/auth/logout` clears the administrator browser cookie. It does not revoke previously copied cookies or the header token; rotating the deployment token invalidates both admin and visitor signatures.
+Administrators call `POST /api/v1/auth/login` with `{"token":"<administrator token>"}` and retain `ntf_admin`, or send `X-Access-Token`. Obtain this token from the private full configuration; do not put it in a URL, checked-in client, example file or command history. `POST /api/v1/auth/logout` clears the administrator browser cookie. It does not revoke previously copied cookies or the header token; rotating the deployment token invalidates both admin and visitor signatures.
 
 Cookie-bearing writes are same-origin and reject cross-site browser requests. CORS is deliberately not enabled. To deploy frontend and backend separately, keep them behind the same public origin. A third-party backend/CLI can use HTTPS and a cookie jar without rendering HTML. Do not disable CSRF protections or expose administrator tokens in frontend JavaScript to support arbitrary browser origins.
 
@@ -42,7 +42,7 @@ Cookie-bearing writes are same-origin and reject cross-site browser requests. CO
 | POST | `/admin/config/validate` | Validate complete draft; no model calls |
 | PUT | `/admin/config` | Save and apply with expected revision and binding confirmation |
 | POST | `/admin/config/restore` | Restore previous TOML with expected revision |
-| GET | `/admin/config/export` | Download the saved, active TOML; never includes key values |
+| GET | `/admin/config/export` | Download masked TOML; explicit `?include_secrets=true` exports the complete private file |
 
 ## Async contract
 
@@ -100,9 +100,13 @@ Task details include `missing_images` (all unavailable images), `image_requests_
 
 Scenes also expose stable `id`, `visual_prompt` and `image_width`/`image_height` (null for legacy images until next validation). Task `progress` reports `stage`, zero-based `scene_index`, `elapsed_seconds` for the current step, `operation_elapsed_seconds`, `images_ready`, `audio_ready`, and total scene count. When idle, stage/index are null and elapsed values are zero. Counts track ready assets, not approval counts; placeholders do not count as ready images. No completion-time estimate is provided.
 
-Administrator configuration accepts `[llm].wire_api="chat"` or `"responses"`. Missing values in existing TOML or task snapshots mean `chat`. The protocol is frozen with each task; a later configuration save affects new tasks only. API keys remain environment references. Responses requests use `/responses`, non-streaming output and `store=false`; incomplete/refused/missing text results are rejected without automatic fallback or retry.
+Administrator configuration accepts `[llm].wire_api="chat"` or `"responses"`. Missing values in existing TOML or task snapshots mean `chat`. The protocol is frozen with each task; a later configuration save affects new tasks only. Task snapshots retain credential references; in full-file mode these resolve against the current private configuration, without reading model environment variables. Responses requests use `/responses`, non-streaming output and `store=false`; incomplete/refused/missing text results are rejected without automatic fallback or retry.
 
-Administrator configuration reads/saves also return a parsed `document` for form editing. `/admin/config/validate` returns that document after validation, without saving or calling providers. Both editors save through the existing TOML endpoint and revision/binding checks.
+Administrator configuration reads/saves return a parsed `document` for form editing. Full-file mode sets `complete_config:true` and returns `schema_version`, `server`, `storage`, `credentials`, `limits`, `llm`, `image`, and `tts`. Models use `credential_ref` (`shared`, `llm`, or `image`). Existing clients may still save the three legacy model sections with `api_key_env`; other sections are retained.
+
+Normal reads, saves, validation and exports mask nonempty secret fields with `__UNCHANGED__`. Preserve that value to keep a secret, supply a new value to replace it, or an empty string to remove it. Only authenticated `GET /admin/config/export?include_secrets=true` returns the complete plaintext configuration. Responses use `Cache-Control: no-store`. A masked export is an editing document, not a complete disaster-recovery backup.
+
+`/admin/config/validate` validates without saving or calling providers and returns a masked document. Clients must retain their original draft until saving; replacing it with the validation response would lose newly entered keys. Both editors use revision/binding checks. Models and credentials apply to subsequent use; task model parameters remain frozen. `restart_required` lists changed runtime settings requiring a restart. Storage locations must be migrated separately before switching; editing a bucket name does not copy data.
 
 The application limits actual received bytes before business dispatch to `MAX_SCRIPT_CHARS * 6 + 196608` (316,608 bytes by default), including whitespace. Only `PUT /tasks/{id}/plan` adds `min(MAX_SCENES,100) * 4000 * 6` bytes for bounded visual prompts and JSON Unicode escapes. `POST /tasks/{id}/images` instead uses `MAX_UPLOAD_IMAGE_BYTES` (10 MiB by default). Legal chunked JSON is allowed without Content-Length. Duplicate/conflicting framing headers or a declared/actual mismatch are rejected; actual overflow returns 413, total read timeout returns 408. JSON field length validation is an additional check, not a replacement. HTTP parsers/proxies may reject malformed traffic before the application; configure independent proxy limits and timeouts.
 
@@ -154,10 +158,12 @@ All errors use the same JSON envelope, including middleware, validation and unex
 
 `X-Request-ID` matches the body. Input validation reports field locations, not the original input values. Unexpected errors expose neither stack traces nor upstream responses. Known task errors retain safe, locally authored messages for HTTP status, network/TLS/timeouts, TTS and media limits. Upstream bodies, URLs and headers are never used as public error messages. Codes include `admin_required`, `forbidden`, `not_found`, `conflict`, `validation_error`, `quota_exceeded`, `unavailable`, `insufficient_storage`.
 
-Response schemas whitelist public fields. Task details omit owner identifiers, raw configuration snapshots, database columns and local file paths. Image-regeneration admission/replay responses expose only their opaque operation ID for correlation, not internal operation metadata. Model keys remain in environment/Secrets, configuration files store only approved key references. Request/response documentation contains schemas only, never live values.
+Response schemas whitelist public fields. Task details omit owner identifiers, raw configuration snapshots, database columns and local file paths. Image-regeneration admission/replay responses expose only their opaque operation ID for correlation, not internal operation metadata. Plaintext keys live in the private config file/bucket; task snapshots and data bucket objects contain model settings and credential references only. Request/response documentation contains schemas only, never live values.
 
 ## Persistence and verification
 
-Configuration and task state live on the data volume. HF's current ephemeral disk can reset tasks, configuration and quota counters. Static frontend separation does not solve this; use durable storage with verified SQLite semantics or export configuration/download videos before restart.
+Configuration lives outside the runtime data directory. With private config/data buckets enabled, every database write is followed by a SQLite backup and content-addressed media uploads; `latest.json` is published and read back last. Failed persistence returns 503, makes health checks fail and stops task admission until restart. Startup restores only a complete, hash-verified snapshot and marks in-flight work interrupted. It never automatically retries a paid provider request. This is a single-writer design: do not run multiple instances against the same buckets.
+
+`session.ephemeral` is false when data snapshots are configured. Without a data bucket or an independent durable backup directory, an HF container rebuild can still lose tasks and quota counters. Before migrating a legacy ephemeral Space, obtain the complete database and media; exporting configuration or downloading videos alone does not preserve task state.
 
 `tests/test_api_pipeline.py` performs the full task, media approval, FFmpeg composition, download and administrator-config sequence through real HTTP only, without requesting a page. Model/image/audio are offline fixtures in this regression, not evidence that a real provider accepts the selected key/model.

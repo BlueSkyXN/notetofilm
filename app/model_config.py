@@ -43,6 +43,12 @@ class ModelConfig:
         self.lock = RLock()
         self.secret_values = {'OPENAI_API_KEY': settings.key, 'LLM_API_KEY': settings.llm_key,
                               'IMAGE_API_KEY': settings.image_key}
+        if settings.credentials is not None:
+            self.secret_values = dict(settings.credentials)
+        self.file_config = None
+        if settings.config_path:
+            from .full_config import FileConfiguration
+            self.file_config = FileConfiguration(settings)
         self.active_text = ''
         self.active = None
 
@@ -108,6 +114,9 @@ class ModelConfig:
         return document
 
     def effective(self, document, required=('llm', 'image')):
+        if self.file_config and self.file_config.failure:
+            from .persistence import PersistenceError
+            raise PersistenceError()
         llm, image, tts = document['llm'], document['image'], document['tts']
         for name in required:
             item = document[name]
@@ -147,6 +156,10 @@ class ModelConfig:
 
     def open(self):
         with self.lock:
+            if self.file_config:
+                self.file_config.open()
+                self.apply_file()
+                return
             if not self.path.exists():
                 text = encode(self.initial())
                 document = self.parse(text)
@@ -156,8 +169,23 @@ class ModelConfig:
             document = self.parse(text)
             self.active_text, self.active = text, document
 
+    def apply_file(self):
+        from .full_config import credentials, model_document
+        self.active = model_document(self.file_config.document)
+        self.active_text = encode(self.active)
+        self.secret_values = credentials(self.file_config.document)
+
+    def export(self, include_secrets=False):
+        with self.lock:
+            if self.file_config and include_secrets:
+                return self.file_config.text
+            return self.info()['text']
+
     def snapshot(self):
         with self.lock:
+            if self.file_config and self.file_config.failure:
+                from .persistence import PersistenceError
+                raise PersistenceError()
             return encode(self.active)
 
     def current(self):
@@ -169,12 +197,17 @@ class ModelConfig:
 
     def info(self):
         with self.lock:
+            if self.file_config:
+                return self.file_config.info()
             return {'text': self.active_text, 'document': self.parse(self.active_text), 'revision': revision(self.active_text),
                     'secrets': {name: bool(value) for name, value in self.secret_values.items()},
                     'has_previous': self.previous.is_file(), 'ephemeral': bool(self.settings.space_host),
                     'storage': 'data/config.toml', 'external_change': self.path.read_text() != self.active_text}
 
     def validate(self, text):
+        if self.file_config:
+            from .full_config import redacted
+            return redacted(self.file_config.prepare(text))
         try:
             document = self.parse(text)
             self.effective(document)
@@ -186,6 +219,10 @@ class ModelConfig:
 
     def save(self, text, expected_revision, confirm_binding=False):
         with self.lock:
+            if self.file_config:
+                self.file_config.save(text, expected_revision, confirm_binding)
+                self.apply_file()
+                return self.info()
             if expected_revision != revision(self.active_text) or self.path.read_text() != self.active_text:
                 raise HTTPException(409, '配置已变化；请重新加载。若文件由外部修改，请核对并重启后再编辑')
             document = self.validate(text)
@@ -200,6 +237,11 @@ class ModelConfig:
 
     def restore(self, expected_revision, confirm_binding=False):
         with self.lock:
+            if self.file_config:
+                previous = self.file_config.read_object('config.previous.toml')
+                if previous is None:
+                    raise HTTPException(409, '没有可恢复的上一版配置')
+                return self.save(previous.decode(), expected_revision, confirm_binding)
             if not self.previous.is_file():
                 raise HTTPException(409, '没有可恢复的上一版配置')
             return self.save(self.previous.read_text(), expected_revision, confirm_binding)
