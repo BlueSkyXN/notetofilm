@@ -22,7 +22,7 @@ from .render import Renderer, digest, duration_error, run_process, validate_asse
 from .errors import UserFacingError
 from .layout import video_layout
 from .persistence import DirectoryBucket, HFBucket, PersistenceError, Snapshots
-from .scheduler import Scheduler
+from .scheduler import POLL_SECONDS, Scheduler
 
 LOG = logging.getLogger('notetofilm.tasks')
 
@@ -51,7 +51,7 @@ class Tasks:
         self.models = ModelConfig(config)
         self.renderer = renderer or Renderer(config)
         self.executor = executor
-        self.scheduler = scheduler or Scheduler(config, stopping=None, storage_failed=self.storage_failed)
+        self.scheduler = scheduler or Scheduler(config, stopping=None, storage_failed=lambda: self.storage_failed)
         self.validator = (lambda path, kind: validate_asset(path, kind, config.max_audio_seconds)) if validator is validate_asset else validator
         self.closed = False
         self.stopping = Event()
@@ -260,6 +260,10 @@ class Tasks:
                          ('请求结果未知，重试可能再次计费。', tid))
             conn.execute("UPDATE scenes SET aud_state='failed',aud_approved=0,aud_ok=0,aud_error=? WHERE task_id=? AND aud_state='running'",
                          ('配音失败，请重试。', tid))
+            conn.execute("UPDATE jobs SET state=CASE WHEN kind='img' THEN 'unknown' ELSE 'failed' END,"
+                         "error=CASE WHEN kind='img' THEN ? ELSE ? END,finished_at=? "
+                         "WHERE operation_id=? AND state='running'",
+                         ('请求结果未知，重试可能再次计费。', '配音失败，请重试。', now(), operation))
             job_records.cancel_queued(conn, operation, '操作失败，剩余队列终止。')
             conn.execute("UPDATE tasks SET status='failed',error=?,pause_requested=0,operation_id=NULL,operation_kind=NULL,operation_scene=NULL WHERE id=?",
                          (message, tid))
@@ -582,6 +586,9 @@ class Tasks:
         except plan_impact.ImpactError as exc:
             raise HTTPException(exc.status, exc.message) from None
         invalidated = {item['id'] for item in invalidations}
+        for row in rows:
+            if row['id'] in invalidated:
+                row.update(img_state='pending', img_revision=floor, img_approved=0, img_ok=0)
         available = set()
         for row in rows:
             path = self.config.data / str(tid) / row['image_path'] if row['image_path'] else None
@@ -778,75 +785,89 @@ class Tasks:
         def snapshot():
             return [{**job, 'state': states[job['id']]} for job in jobs_by_id.values()]
 
-        while True:
-            if not stop_dispatch:
-                if self.stopping.is_set() or self.store.failure:
-                    stop_dispatch, message = True, 'stopped'
-                elif self.pause_requested(tid, operation):
-                    stop_dispatch, message = True, 'paused'
-            if not stop_dispatch:
-                view = snapshot()
-                ready = job_graph.ready_job_ids(view)
-                for job_id in job_graph.execution_order(view):
-                    if states[job_id] != 'queued' or job_id in inflight:
-                        continue
-                    if job_id not in ready:
-                        continue
-                    release = self.scheduler.try_acquire(tid, jobs_by_id[job_id]['kind'])
-                    if release is None:
-                        if self.scheduler.should_stop():
-                            stop_dispatch, message = True, 'stopped'
-                        break
-                    try:
-                        inflight[job_id] = self.scheduler.submit(
-                            lambda j=job_id, r=release: self.run_asset(tid, operation, j, r))
-                    except BaseException:
-                        release()  # submit 失败必须归还槽位，否则全服务容量永久损失。
-                        raise
-            if not inflight:
-                queued_left = [job_id for job_id, state in states.items() if state == 'queued']
-                if not queued_left:
-                    break  # 全部进入终态
-                # 无在途仍有排队：停止信号或上游失败阻断了依赖。
-                stop_dispatch = True
-                if message is None:
-                    message = 'failed'
-                break
-            done, _ = wait(inflight.values(), return_when=FIRST_COMPLETED, timeout=0.2)
-            for future in done:
-                job_id = next(id for id, pending in inflight.items() if pending is future)
+        def stop(reason):
+            nonlocal stop_dispatch, message
+            # 同批完成中，暂停不能覆盖失败，普通失败不能覆盖持久化故障。
+            priority = {None: 0, 'paused': 1, 'failed': 2, 'stopped': 3, 'storage': 4}
+            stop_dispatch = True
+            if priority[reason] > priority[message]:
+                message = reason
+
+        def collect_done():
+            nonlocal failure_detail
+            for job_id, future in list(inflight.items()):
+                if not future.done():
+                    continue
                 del inflight[job_id]
                 try:
                     states[job_id] = future.result()
                 except PersistenceError:
-                    # 存储故障：读写被拒，等待其余在途后交由重启恢复。
                     states[job_id] = 'unknown'
-                    stop_dispatch, message = True, 'storage'
+                    stop('storage')
                 except InterruptedError:
-                    # 未开始执行：保持 running 由重启恢复规则处理。
                     states[job_id] = 'running'
-                    stop_dispatch, message = True, 'stopped'
+                    stop('stopped')
                 except PauseRequested:
-                    # 认领事务被暂停信号拦截并回滚：作业回到队列，转暂停收尾。
                     states[job_id] = 'queued'
-                    stop_dispatch, message = True, 'paused'
+                    stop('paused')
                 except Exception as exc:
                     LOG.warning('task=%s operation=%s job=%s failed=%s', tid, operation, job_id, type(exc).__name__)
                     states[job_id] = 'failed'
-                    stop_dispatch, message = True, 'failed'
+                    stop('failed')
                     if failure_detail is None:
                         failure_detail = error_detail(exc)
-        if inflight:
-            wait(list(inflight.values()))
-            for job_id, future in inflight.items():
-                try:
-                    states[job_id] = future.result()
-                except Exception:
-                    states[job_id] = 'failed'
+
+        try:
+            while True:
+                collect_done()
+                if self.storage_failed:
+                    stop('storage')
+                elif self.stopping.is_set():
+                    stop('stopped')
+                elif not stop_dispatch and self.pause_requested(tid, operation):
+                    stop('paused')
+                if any(state in ('failed', 'unknown') for state in states.values()):
+                    stop('failed')
+                if not stop_dispatch:
+                    view = snapshot()
+                    ready = job_graph.ready_job_ids(view)
+                    for job_id in job_graph.execution_order(view):
+                        collect_done()
+                        if stop_dispatch:
+                            break
+                        if states[job_id] != 'queued' or job_id in inflight or job_id not in ready:
+                            continue
+                        release = self.scheduler.try_acquire(tid, jobs_by_id[job_id]['kind'])
+                        if release is None:
+                            if self.scheduler.should_stop():
+                                stop('storage' if self.storage_failed else 'stopped')
+                                break
+                            continue  # 一类槽位占满时，继续检查另一类就绪作业。
+                        try:
+                            inflight[job_id] = self.scheduler.submit(
+                                lambda j=job_id, r=release: self.run_asset(tid, operation, j, r))
+                        except BaseException:
+                            release()
+                            raise
+                if not inflight:
+                    if stop_dispatch or not any(state == 'queued' for state in states.values()):
+                        break
+                    if job_graph.ready_job_ids(snapshot()):
+                        # 槽位由其他任务占用；等待容量释放，不能把限流当作失败。
+                        self.stopping.wait(POLL_SECONDS)
+                        continue
+                    stop('failed')  # 无在途、无就绪作业：依赖无法继续。
+                    break
+                wait(inflight.values(), return_when=FIRST_COMPLETED, timeout=0.2)
+        finally:
+            # 调度异常也要等待在途作业发布，随后才可释放任务所有权。
+            if inflight:
+                wait(list(inflight.values()))
+                collect_done()
         if message == 'storage':
             return
         if message == 'stopped':
-            return  # worker 的 InterruptedError 分支负责 fail() 收尾
+            raise InterruptedError('Service is stopping')
         if message == 'paused':
             self.finish_paused(tid, operation)
             return
@@ -880,6 +901,9 @@ class Tasks:
             # 暂停信号与认领在同一写事务内串行化：生效后不再有新付费请求（W4-4）。
             if task['pause_requested']:
                 raise PauseRequested('已请求暂停，未认领新作业')
+            if conn.execute("SELECT 1 FROM jobs WHERE operation_id=? AND state IN ('failed','unknown') LIMIT 1",
+                            (operation,)).fetchone():
+                raise HTTPException(409, '本次生成已有作业失败，剩余请求未发起；请检查后恢复。')
             settings = self.task_config(task, ('image',) if kind == 'img' else ())
             scene = dict(conn.execute('SELECT * FROM scenes WHERE task_id=? AND idx=?', (tid, idx)).fetchone())
             reference_records = []
@@ -944,17 +968,17 @@ class Tasks:
             conn.execute(f"UPDATE scenes SET {kind}_state='running',{kind}_approved=0,{kind}_ok=0,{kind}_error=NULL WHERE task_id=? AND idx=?", (tid, idx))
         task_dir = self.config.data / str(tid)
         folder = task_dir / 'assets' / operation
-        folder.mkdir(parents=True, exist_ok=True)
         suffix = '.png' if kind == 'img' else '.mp3'
         output = folder / f'{idx:03d}-{kind}{suffix}'
         temp = folder / f'{idx:03d}-{kind}.part{suffix}'
-        provider = self.provider_for(tid, ('image',) if kind == 'img' else ())
         placeholder = kind == 'img' and not settings.image_connection[1]
         references = []
         reference_context = []
         previous_context = None
         requested = False
         try:
+            folder.mkdir(parents=True, exist_ok=True)
+            provider = self.provider_for(tid, ('image',) if kind == 'img' else ())
             for record in reference_records:
                 content = record['path'].read_bytes()
                 if digest(record['path']) != record['sha256']:
@@ -964,6 +988,8 @@ class Tasks:
                     reference_context.append({'asset_id': record['id'], 'sha256': record['sha256']})
                 else:
                     previous_context = {'scene_id': record['scene_id'], 'asset_id': record['id'], 'sha256': record['sha256']}
+            if self.storage_failed:
+                raise PersistenceError()
             requested = True
             if placeholder:
                 run_process(['ffmpeg', '-nostdin', '-v', 'error', '-n', '-f', 'lavfi', '-i',
@@ -977,6 +1003,55 @@ class Tasks:
                 provider.audio(scene['narration'], temp)
             duration = self.validator(temp, kind)
             temp.replace(output)
+            with self.store.connect(write=True) as conn:
+                if self.task(conn, tid)['operation_id'] != operation:
+                    raise RuntimeError('任务所有权已变化，未发布素材')
+                current = conn.execute('SELECT * FROM scenes WHERE task_id=? AND idx=?', (tid, idx)).fetchone()
+                if job_id is not None:
+                    job = job_records.job_row(conn, job_id)
+                    if job and job['expected_material_revision'] is not None and \
+                            current[f'{kind}_revision'] != job['expected_material_revision']:
+                        raise RuntimeError('素材版本已变化，未发布')
+                column = 'image_path' if kind == 'img' else 'audio_path'
+                relative = str(output.relative_to(task_dir))
+                conn.execute(f'UPDATE scenes SET {kind}_state=?,{kind}_revision={kind}_revision+1,'
+                             f'{kind}_approved=0,{kind}_ok=0,{kind}_error=NULL,{column}=? WHERE task_id=? AND idx=?',
+                             ('placeholder' if placeholder else 'ready', relative, tid, idx))
+                if kind == 'img':
+                    dimensions = duration if isinstance(duration, dict) else {}
+                    conn.execute('UPDATE scenes SET img_placeholder=?,image_width=?,image_height=? WHERE task_id=? AND idx=?',
+                                 (int(placeholder), dimensions.get('width'), dimensions.get('height'), tid, idx))
+                    if not placeholder:
+                        context = {'visual_prompt': scene['visual_prompt'], 'model': settings.image_model,
+                                   'size': settings.image_size, 'quality': settings.image_quality,
+                                   'reference_protocol': settings.image_reference_protocol,
+                                   'fixed_references': reference_context, 'previous_scene': previous_context}
+                        asset_id = conn.execute('INSERT INTO image_assets(task_id,source,path,sha256,mime,width,height,byte_size,'
+                                     'origin_scene_id,context_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                                     (tid, 'generated', relative, digest(output), 'image/png' if output.suffix == '.png' else 'image/jpeg',
+                                      dimensions.get('width') or 0, dimensions.get('height') or 0, output.stat().st_size,
+                                      scene['id'], json.dumps(context, ensure_ascii=False), now())).lastrowid
+                        conn.execute('UPDATE scenes SET image_asset_id=? WHERE task_id=? AND idx=?', (asset_id, tid, idx))
+                        current_scenes = self.scenes(conn, tid)
+                        dependent_floor = self.next_revision(task, current_scenes)
+                        for dependent in plan_impact.dependents_to_invalidate(current_scenes, scene['id']):
+                            conn.execute("UPDATE scenes SET img_state='pending',img_revision=?,img_approved=0,img_ok=0,"
+                                         "img_error='前镜图片已更新；请重新生成或改选固定参考。' WHERE task_id=? AND id=?",
+                                         (dependent_floor, tid, dependent['id']))
+                else:
+                    conn.execute('UPDATE scenes SET audio_duration_seconds=? WHERE task_id=? AND idx=?',
+                                 (duration if type(duration) in (int, float) else None, tid, idx))
+                if job_id is not None:
+                    # 成功结果要等媒体校验、版本发布和持久化确认后才可见（手册 W3）。
+                    result = {'scene_id': scene['id'], 'kind': kind, 'path': relative,
+                              'sha256': digest(output), 'revision': current[f'{kind}_revision'] + 1}
+                    if kind == 'img':
+                        result['placeholder'] = bool(placeholder)
+                        if not placeholder:
+                            result['asset_id'] = asset_id
+                    job_records.finish(conn, job_id, 'succeeded', result=result)
+        except PersistenceError:
+            raise
         except Exception as exc:
             # 认领之后、请求之前（参考读取、摘要复核）的失败明确记 failed；
             # 只有已发出的请求才可能 unknown（I2，不自动重试）。
@@ -988,59 +1063,15 @@ class Tasks:
                 message = error_detail(exc) or '请求准备失败，未发起外部请求。'
                 final_state = 'failed'
             with self.store.connect(write=True) as conn:
-                conn.execute(f'UPDATE scenes SET {kind}_state=?,{kind}_error=? WHERE task_id=? AND idx=?',
-                             (final_state, message, tid, idx))
+                if self.task(conn, tid)['operation_id'] == operation:
+                    conn.execute(f'UPDATE scenes SET {kind}_state=?,{kind}_error=? WHERE task_id=? AND idx=?',
+                                 (final_state, message, tid, idx))
                 if job_id is not None:
-                    job_records.finish(conn, job_id, final_state,
-                                       error=job_records.sanitize_error(message, (settings.image_connection[1], settings.key)))
+                    job = job_records.job_row(conn, job_id)
+                    if job and job['state'] == 'running':
+                        job_records.finish(conn, job_id, final_state,
+                                           error=job_records.sanitize_error(message, (settings.image_connection[1], settings.key)))
             raise
-        with self.store.connect(write=True) as conn:
-            if self.task(conn, tid)['operation_id'] != operation:
-                raise RuntimeError('任务所有权已变化，未发布素材')
-            current = conn.execute('SELECT * FROM scenes WHERE task_id=? AND idx=?', (tid, idx)).fetchone()
-            if job_id is not None:
-                job = job_records.job_row(conn, job_id)
-                if job and job['expected_material_revision'] is not None and \
-                        current[f'{kind}_revision'] != job['expected_material_revision']:
-                    raise RuntimeError('素材版本已变化，未发布')
-            column = 'image_path' if kind == 'img' else 'audio_path'
-            relative = str(output.relative_to(task_dir))
-            conn.execute(f'UPDATE scenes SET {kind}_state=?,{kind}_revision={kind}_revision+1,'
-                         f'{kind}_approved=0,{kind}_ok=0,{kind}_error=NULL,{column}=? WHERE task_id=? AND idx=?',
-                         ('placeholder' if placeholder else 'ready', relative, tid, idx))
-            if kind == 'img':
-                dimensions = duration if isinstance(duration, dict) else {}
-                conn.execute('UPDATE scenes SET img_placeholder=?,image_width=?,image_height=? WHERE task_id=? AND idx=?',
-                             (int(placeholder), dimensions.get('width'), dimensions.get('height'), tid, idx))
-                if not placeholder:
-                    context = {'visual_prompt': scene['visual_prompt'], 'model': settings.image_model,
-                               'size': settings.image_size, 'quality': settings.image_quality,
-                               'reference_protocol': settings.image_reference_protocol,
-                               'fixed_references': reference_context, 'previous_scene': previous_context}
-                    asset_id = conn.execute('INSERT INTO image_assets(task_id,source,path,sha256,mime,width,height,byte_size,'
-                                 'origin_scene_id,context_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-                                 (tid, 'generated', relative, digest(output), 'image/png' if output.suffix == '.png' else 'image/jpeg',
-                                  dimensions.get('width') or 0, dimensions.get('height') or 0, output.stat().st_size,
-                                  scene['id'], json.dumps(context, ensure_ascii=False), now())).lastrowid
-                    conn.execute('UPDATE scenes SET image_asset_id=? WHERE task_id=? AND idx=?', (asset_id, tid, idx))
-                    current_scenes = self.scenes(conn, tid)
-                    dependent_floor = self.next_revision(task, current_scenes)
-                    for dependent in plan_impact.dependents_to_invalidate(current_scenes, scene['id']):
-                        conn.execute("UPDATE scenes SET img_state='pending',img_revision=?,img_approved=0,img_ok=0,"
-                                     "img_error='前镜图片已更新；请重新生成或改选固定参考。' WHERE task_id=? AND id=?",
-                                     (dependent_floor, tid, dependent['id']))
-            else:
-                conn.execute('UPDATE scenes SET audio_duration_seconds=? WHERE task_id=? AND idx=?',
-                             (duration if type(duration) in (int, float) else None, tid, idx))
-            if job_id is not None:
-                # 成功结果要等媒体校验、版本发布和持久化确认后才可见（手册 W3）。
-                result = {'scene_id': scene['id'], 'kind': kind, 'path': relative,
-                          'sha256': digest(output), 'revision': current[f'{kind}_revision'] + 1}
-                if kind == 'img':
-                    result['placeholder'] = bool(placeholder)
-                    if not placeholder:
-                        result['asset_id'] = asset_id
-                job_records.finish(conn, job_id, 'succeeded', result=result)
 
     def regen(self, tid, idx, kind, confirmed, expected_revision=None, request_key=None, requester=None):
         if kind not in ('img', 'aud'):
@@ -1074,7 +1105,6 @@ class Tasks:
             operation = self.claim(conn, tid, kind, 'review', idx)
             job_id = job_records.create_jobs(conn, tid, operation, task['plan_revision'],
                                               [{'scene_id': scene['id'], 'scene_index': idx, 'kind': kind}])[0]
-            conn.execute(f"UPDATE scenes SET {kind}_state='running',{kind}_approved=0,{kind}_ok=0 WHERE task_id=? AND idx=?", (tid, idx))
             if kind == 'img':
                 conn.execute('INSERT INTO image_requests(owner,request_key,parameter_hash,task_id,operation_id,created_at) VALUES(?,?,?,?,?,?)',
                              (owner, request_key, parameter_hash, tid, operation, now()))

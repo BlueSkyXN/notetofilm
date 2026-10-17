@@ -4,13 +4,17 @@
 引用链闭包完整、失败收尾不吞成功素材、其他任务不受影响。
 不依赖"必须快多少毫秒"类脆弱断言（手册 W6）。
 """
+import json
 import tempfile
 import time
 import unittest
 import uuid
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from fastapi import HTTPException
 
@@ -94,12 +98,163 @@ class SchedulerTests(unittest.TestCase):
         self.assertGreater(self.provider.peak['aud'], 1, '配音应当存在并行执行')
         self.assertGreater(self.provider.overlap_samples, 0, '图片与配音应当存在重叠执行')
 
+    def test_global_capacity_waits_without_failing_another_task(self):
+        tid = self.planned()
+        scheduler = self.service.scheduler
+        holders = [scheduler.try_acquire('other-task', kind) for kind in ('img', 'aud', 'aud')]
+        attempted = Event()
+        acquire = scheduler.try_acquire
+
+        def observe(task_id, kind):
+            result = acquire(task_id, kind)
+            attempted.set()
+            return result
+
+        self.service.generate(tid, True)
+        with patch.object(scheduler, 'try_acquire', side_effect=observe), ThreadPoolExecutor(1) as pool:
+            worker = pool.submit(self.executor.run)
+            try:
+                self.assertTrue(attempted.wait(2))
+                with self.assertRaises(TimeoutError):
+                    worker.result(timeout=0.1)
+            finally:
+                for release in holders:
+                    release()
+                worker.result(timeout=5)
+        self.assertEqual(self.service.detail(tid)['status'], 'review')
+        self.assertEqual(len(self.provider.images), 3)
+        self.assertEqual(len(self.provider.audios), 3)
+
+    def test_two_generating_tasks_share_global_capacity(self):
+        tids = [self.planned('并行任务一'), self.planned('并行任务二')]
+        for tid in tids:
+            self.service.generate(tid, True)
+        with ThreadPoolExecutor(2) as pool:
+            workers = [pool.submit(self.executor.run) for _ in tids]
+            for worker in workers:
+                worker.result(timeout=5)
+        self.assertTrue(all(self.service.detail(tid)['status'] == 'review' for tid in tids))
+        self.assertEqual(len(self.provider.images), 6)
+        self.assertEqual(len(self.provider.audios), 6)
+        self.assertLessEqual(self.provider.peak['img'], self.config.image_concurrency)
+        self.assertLessEqual(self.provider.peak['aud'], self.config.audio_concurrency)
+
+    def test_busy_image_capacity_does_not_block_ready_audio(self):
+        tid = self.planned()
+        release_image = self.service.scheduler.try_acquire('other-task', 'img')
+        all_audio = Event()
+        audio = self.provider.audio
+
+        def observe(narration, output):
+            audio(narration, output)
+            if len(self.provider.audios) == 3:
+                all_audio.set()
+
+        self.provider.audio = observe
+        self.service.generate(tid, True)
+        with ThreadPoolExecutor(1) as pool:
+            worker = pool.submit(self.executor.run)
+            try:
+                self.assertTrue(all_audio.wait(2), '生图等待期间应继续派发可用配音作业')
+                self.assertEqual(self.provider.images, [])
+            finally:
+                release_image()
+                worker.result(timeout=5)
+        self.assertEqual(self.service.detail(tid)['status'], 'review')
+
+    def test_scheduler_observes_current_storage_failures(self):
+        for target in (self.service.store, SimpleNamespace(failure=False)):
+            with self.subTest(target=type(target).__name__):
+                with patch.object(self.service.models, 'file_config', target):
+                    target.failure = True
+                    try:
+                        self.assertTrue(self.service.scheduler.should_stop())
+                        release = self.service.scheduler.try_acquire(1, 'img')
+                        if release:
+                            release()
+                        self.assertIsNone(release)
+                    finally:
+                        target.failure = False
+
+    def test_failed_job_blocks_later_claims_in_same_operation(self):
+        tid = self.planned()
+        self.service.generate(tid, True)
+        with self.service.store.connect() as conn:
+            operation = self.service.task(conn, tid)['operation_id']
+            jobs = job_records.jobs_for_operation(conn, operation)
+        image = next(job for job in jobs if job['kind'] == 'img')
+        audio = next(job for job in jobs if job['kind'] == 'aud')
+        self.provider.fail_image = 'first'
+        with self.assertRaises(TimeoutError):
+            self.service.asset(tid, operation, image['scene_index'], 'img', job_id=image['id'])
+        with self.assertRaises(HTTPException):
+            self.service.asset(tid, operation, audio['scene_index'], 'aud', job_id=audio['id'])
+        self.assertEqual(self.provider.audios, [])
+
+    def test_submit_failure_waits_for_claimed_assets_to_publish(self):
+        tid = self.planned()
+        started, released, rejected = Event(), Event(), Event()
+        audio = self.provider.audio
+
+        def held_audio(narration, output):
+            started.set()
+            if not released.wait(5):
+                raise RuntimeError('test release timed out')
+            audio(narration, output)
+
+        self.provider.audio = held_audio
+        submit = self.service.scheduler.submit
+        submitted = []
+
+        def reject_second(work):
+            if submitted:
+                if not started.wait(2):
+                    raise RuntimeError('test asset did not start')
+                rejected.set()
+                raise RuntimeError('executor rejected submission')
+            submitted.append(True)
+            return submit(work)
+
+        self.service.generate(tid, True)
+        with patch.object(self.service.scheduler, 'submit', side_effect=reject_second), ThreadPoolExecutor(1) as pool:
+            worker = pool.submit(self.executor.run)
+            try:
+                self.assertTrue(rejected.wait(2))
+                with self.assertRaises(TimeoutError):
+                    worker.result(timeout=0.1)
+            finally:
+                released.set()
+                worker.result(timeout=5)
+                self.service.scheduler.close()
+        detail = self.service.detail(tid)
+        self.assertEqual(detail['status'], 'failed')
+        self.assertEqual(detail['scenes'][0]['aud_state'], 'ready')
+        with self.service.store.connect() as conn:
+            states = {row['state'] for row in conn.execute('SELECT state FROM jobs WHERE task_id=?', (tid,))}
+        self.assertNotIn('running', states)
+        self.assertNotIn('queued', states)
+
+    def test_pause_before_regen_claim_keeps_existing_material(self):
+        tid = self.planned()
+        self.generate(tid)
+        before = self.service.detail(tid)['scenes'][0]
+        self.service.gate(tid, 0, 'img', True, before['img_revision'])
+        self.service.regen(tid, 0, 'img', True, before['img_revision'], uuid.uuid4().hex)
+        self.service.request_pause(tid)
+        self.executor.run()
+        detail = self.service.detail(tid)
+        self.assertEqual(detail['status'], 'interrupted')
+        self.assertEqual(detail['scenes'][0]['img_state'], 'ready')
+        self.assertEqual(detail['scenes'][0]['img_ok'], 1)
+        self.assertEqual(detail['scenes'][0]['img_revision'], before['img_revision'])
+        self.assertEqual(len(self.provider.images), 3)
+
     def test_serial_configuration_keeps_single_flight(self):
         self.service.scheduler.close()
         serial = replace(self.config, image_concurrency=1, audio_concurrency=1, task_inflight=1)
         self.provider2 = ProbeProviders()
         self.service.scheduler = __import__('app.scheduler', fromlist=['Scheduler']).Scheduler(
-            serial, stopping=None, storage_failed=self.service.storage_failed)
+            serial, stopping=None, storage_failed=lambda: self.service.storage_failed)
         self.service.scheduler.stopping = self.service.stopping
         self.service.config = serial
         self.provider.plan_result = ['一', '二', '三']
@@ -264,6 +419,30 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(detail['status'], 'review')
         # 损坏镜与其下游 B、C 都重新生成（3 张新图）。
         self.assertEqual(len(self.provider.images), before_images + 3)
+
+    def test_corrupt_upstream_relinks_already_queued_downstream(self):
+        tid = self._plan_with_chain()['tid']
+        detail = self.service.detail(tid)
+        draft = [{k: scene[k] for k in ('id', 'narration', 'visual_prompt')} for scene in detail['scenes']]
+        draft[1]['visual_prompt'] = '已修改的第二镜'
+        self.service.save_plan(tid, draft, detail['plan_revision'])
+        (self.config.data / str(tid) / detail['scenes'][0]['image_path']).write_bytes(b'')
+        with self.service.store.connect(write=True) as conn:
+            conn.execute("UPDATE tasks SET status='failed' WHERE id=?", (tid,))
+        coordinate = self.service.coordinate_jobs
+        rebuilt = []
+
+        def inspect(task_id, operation, task, only_idx=None):
+            with self.service.store.connect() as conn:
+                rebuilt.extend(job_records.jobs_for_operation(conn, operation))
+            coordinate(task_id, operation, task, only_idx)
+
+        self.service.retry(tid, True)
+        with patch.object(self.service, 'coordinate_jobs', side_effect=inspect):
+            self.executor.run()
+        images = {job['scene_index']: job for job in rebuilt if job['kind'] == 'img'}
+        self.assertIn(images[0]['id'], json.loads(images[1]['depends_on']))
+        self.assertEqual(self.service.detail(tid)['status'], 'review')
 
     def test_progress_reports_persisted_inflight_jobs(self):
         tid = self.planned()

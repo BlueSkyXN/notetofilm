@@ -95,6 +95,12 @@ class ImageIdempotencyTests(unittest.TestCase):
 
     def test_claim_before_crash_is_not_dispatched_on_replay(self):
         first = self.redo()
+        with self.service.store.connect() as conn:
+            job_id = conn.execute('SELECT id FROM jobs WHERE operation_id=?', (first['operation_id'],)).fetchone()[0]
+        # 模拟实际认领并进入供应商后进程退出，区别于仍在 queued 的重做。
+        with patch.object(self.provider, 'image', side_effect=SystemExit('simulated crash')):
+            with self.assertRaises(SystemExit):
+                self.service.asset(self.tid, first['operation_id'], 0, 'img', job_id=job_id)
         self.service.close()
         self.executor = ManualExecutor()
         self.service = self.new_service()
