@@ -116,6 +116,26 @@ class PlanImpactPreviewTests(unittest.TestCase):
         self.assertEqual([scene['aud_approval_kept'] for scene in preview['scenes']], [True, True, True])
         self.assertEqual(preview['image_requests_needed'], 0)
 
+    def test_replacing_upstream_image_previews_downstream_requests_and_approvals(self):
+        plan = self.draft()
+        for idx in (1, 2):
+            plan[idx]['image'] = {'source': 'generated', 'asset_id': None,
+                                  'fixed_reference_asset_ids': [], 'previous_scene_id': plan[idx - 1]['id']}
+        self.save(plan)
+        self.generate()
+        for scene in self.detail()['scenes']:
+            self.service.gate(self.tid, scene['idx'], 'img', True, scene['img_revision'])
+        plan = self.draft()
+        plan[0]['image'] = {'source': 'asset', 'asset_id': self.detail()['scenes'][2]['image_asset_id']}
+        preview = self.preview(plan)
+        self.save(plan)
+        saved = self.detail()
+        self.assertEqual(saved['image_requests_needed'], 2)
+        self.assertEqual(preview['image_requests_needed'], saved['image_requests_needed'])
+        self.assertEqual(preview['scenes'][1]['image'], 'redo')
+        self.assertFalse(preview['scenes'][1]['img_approval_kept'])
+        self.assertTrue(preview['scenes'][1]['aud_approval_kept'])
+
     def test_preview_is_read_only(self):
         before = self.detail()
         snapshot_count = []

@@ -214,7 +214,7 @@ class TaskTests(unittest.TestCase):
         self.service.regen(a, 0, 'aud', True)
         self.raises_status(429, self.service.regen, b, 0, 'aud', True)
 
-    def test_restart_covers_submitted_and_running_operations(self):
+    def test_restart_covers_submitted_and_queued_operations(self):
         tid = self.review()
         self.redo_image(tid)
         with self.service.store.connect(write=True) as conn:
@@ -222,7 +222,7 @@ class TaskTests(unittest.TestCase):
         self.service.store.recover()
         detail = self.service.detail(tid)
         self.assertEqual(detail['status'], 'interrupted')
-        self.assertEqual(detail['scenes'][0]['img_state'], 'unknown')
+        self.assertEqual(detail['scenes'][0]['img_state'], 'ready')
         self.assertFalse(detail['busy'])
         self.assertEqual(self.service.detail(submitted)['status'], 'interrupted')
 

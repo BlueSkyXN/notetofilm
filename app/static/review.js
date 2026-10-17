@@ -51,27 +51,12 @@ function readDuration(){
   const value=Number(input.value);
   return input.closest('#duration-edit').hidden||!Number.isInteger(value)?{}:{target_duration_seconds:value};
 }
-let impactTimer=null,impactSeq=0;
-function scheduleImpact(buildBody,target){
-  const seq=++impactSeq;
-  target.textContent='正在评估修改影响…';
-  if(impactTimer)clearTimeout(impactTimer);
-  impactTimer=setTimeout(async()=>{
-    try{
-      const result=await request(`/api/v1/tasks/${tid}/plan/impact`,buildBody());
-      if(seq!==impactSeq)return;
-      target.textContent=renderPlanImpact(result);
-    }catch(error){
-      if(seq!==impactSeq)return;
-      target.textContent=`未取得修改影响（${error.message}）；保存时会重新校验。`;
-    }
-  },400);
-}
+const impactPreview=createImpactPreview(body=>request(`/api/v1/tasks/${tid}/plan/impact`,body));
 function showPlanImpact(){
   const note=document.getElementById('plan-impact');
   if(!note)return;
-  if(!editing){note.textContent='';return;}
-  scheduleImpact(()=>({scenes:readPlanInputs(),revision:editorRevision??current?.plan_revision,...readLayout(),...readDuration()}),note);
+  if(!editing){impactPreview.clear(note);note.textContent='';return;}
+  impactPreview.schedule({scenes:readPlanInputs(),revision:editorRevision??current?.plan_revision,...readLayout(),...readDuration()},note);
 }
 function rememberPlanDraft(){
   editing=true;
@@ -370,8 +355,8 @@ function update(task){
     card.querySelector('.scene-error').textContent=[s.img_error,s.aud_error].filter(Boolean).join('；');
     const editor=card.querySelector('.scene-edit');
     editor.hidden=task.status==='done'||!!task.archived||task.busy;
-    if(!editor.open){card.dataset.planRevision=task.plan_revision;editor.querySelector('[data-edit="narration"]').value=s.narration;editor.querySelector('[data-edit="visual"]').value=s.visual_prompt;editor.querySelector('[data-impact]').textContent='';}
-    else if(Number(card.dataset.planRevision)!==task.plan_revision)editor.querySelector('[data-impact]').textContent='分镜已在其他页面更新，当前草稿尚未保存。请复制需保留的文字，再取消本镜修改并重新编辑。';
+    if(!editor.open){impactPreview.clear(editor.querySelector('[data-impact]'));card.dataset.planRevision=task.plan_revision;editor.querySelector('[data-edit="narration"]').value=s.narration;editor.querySelector('[data-edit="visual"]').value=s.visual_prompt;editor.querySelector('[data-impact]').textContent='';}
+    else if(Number(card.dataset.planRevision)!==task.plan_revision){impactPreview.clear(editor.querySelector('[data-impact]'));editor.querySelector('[data-impact]').textContent='分镜已在其他页面更新，当前草稿尚未保存。请复制需保留的文字，再取消本镜修改并重新编辑。';}
   }
   showLayout();showProgress();showOverview();showPlanImpact();
   renderImageAssets();
@@ -628,9 +613,9 @@ document.getElementById('scenes').addEventListener('input',event=>{
   const card=field.closest('.scene');
   const scene=current.scenes.find(item=>item.id===Number(card.dataset.id));
   if(!scene)return;
-  if(Number(card.dataset.planRevision)!==current.plan_revision){card.querySelector('[data-impact]').textContent='分镜已在其他页面更新，请复制需保留的文字，再取消本镜修改并重新编辑。';return;}
+  if(Number(card.dataset.planRevision)!==current.plan_revision){impactPreview.clear(card.querySelector('[data-impact]'));card.querySelector('[data-impact]').textContent='分镜已在其他页面更新，请复制需保留的文字，再取消本镜修改并重新编辑。';return;}
   const narration=card.querySelector('[data-edit="narration"]').value,visual=card.querySelector('[data-edit="visual"]').value;
-  scheduleImpact(()=>({scenes:current.scenes.map(item=>({id:item.id,narration:item.id===scene.id?narration:item.narration,visual_prompt:item.id===scene.id?visual:item.visual_prompt})),revision:Number(card.dataset.planRevision),aspect_ratio:current.aspect_ratio,image_fit:current.image_fit}),card.querySelector('[data-impact]'));
+  impactPreview.schedule({scenes:current.scenes.map(item=>({id:item.id,narration:item.id===scene.id?narration:item.narration,visual_prompt:item.id===scene.id?visual:item.visual_prompt})),revision:Number(card.dataset.planRevision),aspect_ratio:current.aspect_ratio,image_fit:current.image_fit},card.querySelector('[data-impact]'));
 });
 document.getElementById('scenes').addEventListener('click',async event=>{
   const button=event.target.closest('button[data-action]');if(!button||button.disabled)return;

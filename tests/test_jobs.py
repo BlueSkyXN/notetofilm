@@ -10,6 +10,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
+from unittest.mock import patch
 
 from app.config import Config
 from app.full_config import encode_full, read_toml, validate_full
@@ -175,6 +176,56 @@ class JobRecordTests(unittest.TestCase):
         self.assertIn('未自动重试', failed[0]['error'])
         self.assertNotIn('jobs-model', failed[0]['error'])
         self.assertNotIn('TimeoutError', failed[0]['error'])
+
+    def test_output_directory_failure_finishes_claimed_jobs_without_requests(self):
+        tid = self.service.submit('输出目录创建失败')['task_id']
+        self.executor.run()
+        self.service.generate(tid, True)
+        with patch.object(Path, 'mkdir', side_effect=OSError('output directory unavailable')):
+            self.executor.run()
+        rows = self.all_jobs(tid)
+        self.assertTrue(any(row['started_at'] for row in rows))
+        self.assertTrue(all(row['state'] in ('failed', 'cancelled') for row in rows))
+        self.assertEqual(self.providers.images, [])
+        self.assertEqual(self.providers.audios, [])
+        self.assertEqual(self.service.detail(tid)['status'], 'failed')
+
+    def test_publication_failure_leaves_no_running_job(self):
+        tid = self.service.submit('发布版本冲突')['task_id']
+        self.executor.run()
+
+        def changed_revision(path, kind):
+            validate_fixture(path, kind)
+            if kind == 'img':
+                with self.service.store.connect(write=True) as conn:
+                    conn.execute('UPDATE scenes SET img_revision=img_revision+1 WHERE task_id=? AND idx=0', (tid,))
+
+        self.service.validator = changed_revision
+        self.service.generate(tid, True)
+        self.executor.run()
+        rows = self.all_jobs(tid)
+        self.assertEqual(self.service.detail(tid)['status'], 'failed')
+        self.assertTrue(all(row['state'] in job_records.TERMINAL_STATES for row in rows))
+
+    def test_old_publication_failure_does_not_modify_new_operation_scene(self):
+        tid = self.review()
+        revision = self.service.detail(tid)['scenes'][0]['img_revision']
+        operation = self.service.regen(tid, 0, 'img', True, revision, uuid.uuid4().hex)['operation_id']
+        job = next(row for row in self.all_jobs(tid) if row['operation_id'] == operation)
+
+        def transfer_operation(path, kind):
+            validate_fixture(path, kind)
+            with self.service.store.connect(write=True) as conn:
+                conn.execute("UPDATE tasks SET operation_id='new-operation' WHERE id=?", (tid,))
+
+        self.service.validator = transfer_operation
+        with self.assertRaises(RuntimeError):
+            self.service.asset(tid, operation, 0, 'img', job_id=job['id'])
+        detail = self.service.detail(tid)
+        self.assertEqual(detail['operation_id'], 'new-operation')
+        self.assertEqual(detail['scenes'][0]['img_state'], 'running')
+        self.assertEqual(detail['scenes'][0]['img_revision'], revision)
+        self.assertEqual(self.all_jobs(tid)[-1]['state'], 'unknown')
 
 
 class ConfigCompatibilityTests(unittest.TestCase):

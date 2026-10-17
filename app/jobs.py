@@ -45,6 +45,9 @@ def create_jobs(conn, tid, operation_id, plan_revision, entries):
     for entry in entries:
         key = (entry['scene_id'], entry['kind'])
         if key in existing:
+            # 媒体复用校验发现损坏后会重建闭包；尚未派发的旧作业也需补上新依赖。
+            conn.execute("UPDATE jobs SET depends_on=? WHERE id=? AND state='queued'",
+                         (json.dumps(entry.get('depends_on') or []), existing[key]))
             result.append(existing[key])
             continue
         cursor = conn.execute(
@@ -54,6 +57,7 @@ def create_jobs(conn, tid, operation_id, plan_revision, entries):
              json.dumps(entry.get('depends_on') or [], ensure_ascii=False), '{}', '',
              'queued', now()))
         result.append(cursor.lastrowid)
+        existing[key] = cursor.lastrowid
     return result
 
 

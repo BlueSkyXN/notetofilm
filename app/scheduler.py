@@ -44,6 +44,8 @@ class Scheduler:
 
         应停止与暂无槽位用 should_stop() 区分，协调者据此决定重试还是收尾。
         """
+        if self.should_stop():
+            return None
         global_slot = self.image_slots if kind == 'img' else self.audio_slots
         task_slot = self._task_slots_for(tid)
         if not global_slot.acquire(blocking=False):
