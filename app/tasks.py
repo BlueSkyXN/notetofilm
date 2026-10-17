@@ -3,7 +3,7 @@ import math
 import shutil
 import uuid
 import json
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import replace
 from datetime import datetime, timezone
 from threading import Event
@@ -11,6 +11,9 @@ from threading import Event
 from fastapi import HTTPException
 
 from .db import Store, now, script_digest
+from .domain import job_graph, plan_impact
+from .domain import references as reference_rules
+from . import jobs as job_records
 from .providers import (MIN_TARGET_SECONDS, NARRATION_CHARS_PER_SECOND, Providers,
                          max_target_seconds, narration_budget_chars)
 from .model_config import ModelConfig
@@ -18,13 +21,28 @@ from .image_assets import validate_and_normalize
 from .render import Renderer, digest, duration_error, run_process, validate_asset
 from .errors import UserFacingError
 from .layout import video_layout
-from .persistence import DirectoryBucket, HFBucket, Snapshots
+from .persistence import DirectoryBucket, HFBucket, PersistenceError, Snapshots
+from .scheduler import Scheduler
 
 LOG = logging.getLogger('notetofilm.tasks')
 
 
+class PauseRequested(Exception):
+    """认领事务内检测到暂停请求：作业留 queued，由收尾转为 interrupted。"""
+
+
+def error_detail(exc):
+    """提取异常的用户可见文案；HTTPException 取 detail。"""
+    if isinstance(exc, HTTPException):
+        return str(exc.detail)
+    if isinstance(exc, UserFacingError):
+        return str(exc)
+    return None
+
+
 class Tasks:
-    def __init__(self, config, providers=None, renderer=None, executor=None, validator=validate_asset):
+    def __init__(self, config, providers=None, renderer=None, executor=None, validator=validate_asset,
+                 scheduler=None):
         self.config = config
         bucket = HFBucket(config.data_bucket, config.hf_token) if config.data_bucket else DirectoryBucket(config.backup_dir) if config.backup_dir else None
         self.store = Store(config.data, Snapshots(bucket) if bucket else None)
@@ -33,9 +51,11 @@ class Tasks:
         self.models = ModelConfig(config)
         self.renderer = renderer or Renderer(config)
         self.executor = executor
+        self.scheduler = scheduler or Scheduler(config, stopping=None, storage_failed=self.storage_failed)
         self.validator = (lambda path, kind: validate_asset(path, kind, config.max_audio_seconds)) if validator is validate_asset else validator
         self.closed = False
         self.stopping = Event()
+        self.scheduler.stopping = self.stopping
         if hasattr(self.providers, 'stopping'):
             self.providers.stopping = self.stopping
         if hasattr(self.renderer, 'stopping'):
@@ -79,6 +99,7 @@ class Tasks:
         try:
             if self.executor:
                 self.executor.shutdown(wait=True)
+            self.scheduler.close()
         finally:
             self.store.close()
 
@@ -239,6 +260,7 @@ class Tasks:
                          ('请求结果未知，重试可能再次计费。', tid))
             conn.execute("UPDATE scenes SET aud_state='failed',aud_approved=0,aud_ok=0,aud_error=? WHERE task_id=? AND aud_state='running'",
                          ('配音失败，请重试。', tid))
+            job_records.cancel_queued(conn, operation, '操作失败，剩余队列终止。')
             conn.execute("UPDATE tasks SET status='failed',error=?,pause_requested=0,operation_id=NULL,operation_kind=NULL,operation_scene=NULL WHERE id=?",
                          (message, tid))
 
@@ -248,6 +270,7 @@ class Tasks:
         except Exception as exc:
             LOG.warning('task=%s notification_failed=%s', tid, type(exc).__name__)
         with self.store.connect(write=True) as conn:
+            job_records.cancel_queued(conn, operation, '操作完成，未执行的队列终止。')
             conn.execute('UPDATE tasks SET status=?,error=NULL,pause_requested=0,video_path=COALESCE(?,video_path),'
                          'operation_id=NULL,operation_kind=NULL,operation_scene=NULL WHERE id=? AND operation_id=?',
                          (status, video, tid, operation))
@@ -392,50 +415,34 @@ class Tasks:
             raise HTTPException(409, '完整分镜计划缺失，请人工确认后重新规划')
 
     def next_revision(self, task, scenes):
-        return max([task['material_revision_floor'], *[s[f'{k}_revision'] for s in scenes for k in ('img', 'aud')]]) + 1
+        return plan_impact.next_revision(task['material_revision_floor'], scenes)
 
     def missing_images(self, tid, scenes):
         return sum(not self.image_available(tid, s) for s in scenes)
 
     @staticmethod
     def image_spec(scene):
-        if not scene.get('image_spec_json'):
-            return {'source': 'generated', 'asset_id': None, 'fixed_reference_asset_ids': [], 'previous_scene_id': None}
-        try:
-            value = json.loads(scene['image_spec_json'])
-        except (TypeError, ValueError):
-            return {'source': 'generated', 'asset_id': None, 'fixed_reference_asset_ids': [], 'previous_scene_id': None}
-        if not isinstance(value, dict) or value.get('source') not in ('generated', 'asset'):
-            return {'source': 'generated', 'asset_id': None, 'fixed_reference_asset_ids': [], 'previous_scene_id': None}
-        references = value.get('fixed_reference_asset_ids')
-        if not isinstance(references, list):
-            references = []
-        return {'source': value['source'], 'asset_id': value.get('asset_id'), 'fixed_reference_asset_ids': references,
-                'previous_scene_id': value.get('previous_scene_id')}
+        return reference_rules.image_spec(scene)
 
     @classmethod
     def image_source(cls, scene):
-        return cls.image_spec(scene)['source']
+        return reference_rules.image_source(scene)
 
     @classmethod
     def fixed_reference_ids(cls, scene):
-        return cls.image_spec(scene)['fixed_reference_asset_ids']
+        return reference_rules.fixed_reference_ids(scene)
 
     @classmethod
     def previous_scene_id(cls, scene):
-        return cls.image_spec(scene)['previous_scene_id']
+        return reference_rules.previous_scene_id(scene)
 
     def image_available(self, tid, scene):
         return scene['img_state'] in ('ready', 'placeholder') and bool(scene['image_path']) and \
             (self.config.data / str(tid) / scene['image_path']).is_file()
 
     def image_request_scene_ids(self, tid, scenes):
-        pending = set()
-        for scene in scenes:
-            if self.image_source(scene) == 'generated' and (
-                    not self.image_available(tid, scene) or self.previous_scene_id(scene) in pending):
-                pending.add(scene['id'])
-        return pending
+        available = {scene['id'] for scene in scenes if self.image_available(tid, scene)}
+        return plan_impact.image_request_scene_ids(scenes, available)
 
     def image_requests_needed(self, tid, scenes):
         return len(self.image_request_scene_ids(tid, scenes))
@@ -468,10 +475,8 @@ class Tasks:
                 raise HTTPException(409, '图片网关密钥不可用，不能发起带参考的生图请求')
             if len(references) + (1 if previous_id is not None else 0) > capabilities['max_fixed_references']:
                 raise HTTPException(422, f"固定与前镜参考合计最多 {capabilities['max_fixed_references']} 张")
-            if previous_id is not None:
-                upstream = scene_by_id.get(previous_id)
-                if upstream is None or upstream['idx'] >= scene['idx']:
-                    raise HTTPException(409, '前镜引用必须是排序在前的稳定镜头；请重新选择引用')
+            if previous_id is not None and not reference_rules.reference_order_ok(scene, scene_by_id):
+                raise HTTPException(409, '前镜引用必须是排序在前的稳定镜头；请重新选择引用')
             for asset_id in references:
                 asset = conn.execute('SELECT * FROM image_assets WHERE id=? AND task_id=?', (asset_id, tid)).fetchone()
                 path = self.config.data / str(tid) / asset['path'] if asset else None
@@ -479,15 +484,6 @@ class Tasks:
                     raise HTTPException(409, '固定参考图缺失，请重新选择或上传；未发起外部请求')
                 if asset['byte_size'] > 50 * 1024 * 1024:
                     raise HTTPException(422, '固定参考图超过供应商 50MB 上限')
-
-    @staticmethod
-    def asset_ready(row, asset, floor):
-        row.update(image_spec_json=json.dumps({'source': 'asset', 'asset_id': asset['id']}, ensure_ascii=False),
-                   image_asset_id=asset['id'], image_path=asset['path'], img_state='ready', img_placeholder=0,
-                   image_width=asset['width'], image_height=asset['height'], img_error=None)
-        row['img_revision'] = max(row.get('img_revision') or 0, floor)
-        row.setdefault('img_approved', 0)
-        row['img_ok'] = int(row['img_approved'] == row['img_revision'])
 
     @staticmethod
     def audio_duration(scenes):
@@ -502,115 +498,118 @@ class Tasks:
         plan = self.validate_plan(plan)
         with self.store.connect(write=True) as conn:
             task = self.task(conn, tid)
-            self.idle(task, {'planned', 'review', 'failed', 'interrupted'})
             old = self.scenes(conn, tid)
-            self.verify_plan(task, old)
-            duration = task['target_duration_seconds']
-            fingerprint = task['script_hash']
-            if target_duration_seconds is not None and target_duration_seconds != duration:
-                if not self.stored_brief(task):
-                    raise HTTPException(409, '这个任务没有制作要求，不能单独修改目标时长')
+            layout, layout_changed, floor, assets = self._plan_change_checks(
+                conn, tid, task, old, plan, revision, aspect_ratio, image_fit, target_duration_seconds)
+            duration, fingerprint = task['target_duration_seconds'], task['script_hash']
+            if target_duration_seconds is not None and target_duration_seconds != task['target_duration_seconds']:
                 brief = self.normalize_brief(task['purpose'], task['audience'], task['focus'], target_duration_seconds)
                 duration = brief['target_duration_seconds']
-                fingerprint = script_digest('\n'.join([task['script'], brief['purpose'], brief['audience'], brief['focus'], str(duration)]))
-                duplicate = conn.execute("SELECT id FROM tasks WHERE script_hash=? AND owner=? AND status!='done' AND archived=0 AND id!=? LIMIT 1",
-                                         (fingerprint, task['owner'], tid)).fetchone()
-                if duplicate:
-                    raise HTTPException(409, f'相同文稿和制作要求已有任务 {duplicate[0]}，请打开原任务继续')
-            if task['plan_revision'] != revision:
-                raise HTTPException(409, '分镜已被更新，请刷新后重新编辑')
-            layout = video_layout(aspect_ratio or task['aspect_ratio'], image_fit or task['image_fit'])
-            layout_changed = any(layout[k] != task[k] for k in ('aspect_ratio', 'image_fit'))
-            floor = self.next_revision(task, old)
-            used = set()
-            old_by_id = {s['id']: s for s in old}
-            if any('id' in s and s['id'] not in old_by_id for s in plan):
-                raise HTTPException(409, '分镜标识已失效，请刷新后重新编辑')
-            # 显式标识先预留，避免无标识的兼容请求抢占另一镜的素材。
-            reserved = {s['id'] for s in plan if 'id' in s}
-            assets = {row['id']: row for row in self.image_asset_rows(conn, tid)}
+                fingerprint = script_digest('\n'.join([task['script'], brief['purpose'], brief['audience'],
+                                                       brief['focus'], str(duration)]))
+            try:
+                rows, changed_upstream_ids = plan_impact.build_scene_rows(
+                    old, plan, {'task_id': tid, 'floor': floor, 'layout_changed': layout_changed, 'assets': assets})
+            except plan_impact.ImpactError as exc:
+                raise HTTPException(exc.status, exc.message) from None
             conn.execute('DELETE FROM scenes WHERE task_id=?', (tid,))
-            changed_upstream_ids = set()
-            for idx, scene in enumerate(plan):
-                matches = [s for s in old if s['id'] not in used | reserved and
-                           all(s[k] == scene[k] for k in ('narration', 'visual_prompt'))]
-                previous = old_by_id[scene['id']] if 'id' in scene else next((s for s in matches if s['idx'] == idx), matches[0] if matches else None)
-                if previous:
-                    used.add(previous['id'])
-                    row = dict(previous)
-                    row['idx'] = idx
-                    row.update({k: scene[k] for k in ('narration', 'visual_prompt')})
-                    for kind, field, path in (('img', 'visual_prompt', 'image_path'), ('aud', 'narration', 'audio_path')):
-                        changed = previous[field] != scene[field]
-                        if changed or previous['idx'] != idx or (kind == 'img' and layout_changed):
-                            row[f'{kind}_revision'] = floor
-                            row[f'{kind}_approved'] = floor if not changed and not (kind == 'img' and layout_changed) and previous[f'{kind}_state'] == 'ready' and previous[f'{kind}_revision'] > 0 and previous[f'{kind}_approved'] == previous[f'{kind}_revision'] else 0
-                            row[f'{kind}_ok'] = int(row[f'{kind}_approved'] == floor)
-                        if changed:
-                            row.update({f'{kind}_state': 'pending', f'{kind}_error': None, path: None})
-                            if kind == 'img':
-                                row.update(img_placeholder=0, image_width=None, image_height=None)
-                            else:
-                                row['audio_duration_seconds'] = None
-                else:
-                    row = {'task_id': tid, 'idx': idx, **scene,
-                           'img_revision': floor, 'aud_revision': floor,
-                           'img_approved': 0, 'aud_approved': 0, 'img_ok': 0, 'aud_ok': 0}
-                explicit_image = scene.get('image')
-                previous_spec = self.image_spec(previous) if previous else {'source': 'generated', 'asset_id': None,
-                                                                            'fixed_reference_asset_ids': [], 'previous_scene_id': None}
-                if explicit_image:
-                    if explicit_image['source'] == 'generated':
-                        missing_refs = [asset_id for asset_id in explicit_image['fixed_reference_asset_ids'] if asset_id not in assets]
-                        if missing_refs:
-                            raise HTTPException(422, '固定参考图不存在或不属于此任务')
-                        next_spec = {'source': 'generated', 'asset_id': None,
-                                     'fixed_reference_asset_ids': explicit_image['fixed_reference_asset_ids'],
-                                     'previous_scene_id': explicit_image['previous_scene_id']}
-                    else:
-                        next_spec = {'source': 'asset', 'asset_id': explicit_image['asset_id'],
-                                     'fixed_reference_asset_ids': [], 'previous_scene_id': None}
-                else:
-                    next_spec = previous_spec
-                if next_spec['source'] == 'asset':
-                    asset = assets.get(next_spec['asset_id'])
-                    if asset is None:
-                        raise HTTPException(422, '所选图片不存在或不属于此任务')
-                    changed = not previous or previous_spec != next_spec or previous['image_path'] != asset['path']
-                    if changed:
-                        row.update(img_revision=floor, img_approved=0, img_ok=0)
-                    self.asset_ready(row, asset, row['img_revision'])
-                else:
-                    row['image_spec_json'] = json.dumps(next_spec, ensure_ascii=False)
-                    reference_changed = previous_spec != next_spec
-                    if not previous or reference_changed:
-                        row.update(img_state='pending', img_placeholder=0, image_path=None, img_revision=floor,
-                                   img_approved=0, img_ok=0,
-                                   image_width=None, image_height=None, img_error=None)
-                    if row.get('img_state') == 'pending' and not row.get('image_path'):
-                        row['image_asset_id'] = None
-                if previous and (row.get('image_path') != previous['image_path'] or
-                                 row.get('img_state') == 'pending' and not row.get('image_path')):
-                    changed_upstream_ids.add(previous['id'])
-                row.pop('image', None)
+            for row in rows:
                 columns = ','.join(row)
-                conn.execute(f'INSERT INTO scenes({columns}) VALUES({",".join("?" for _ in row)})', tuple(row.values()))
-            saved = self.scenes(conn, tid)
-            positions = {scene['id']: scene['idx'] for scene in saved}
-            for inserted in saved:
-                previous_id = self.previous_scene_id(inserted)
-                if previous_id is not None and (previous_id not in positions or positions[previous_id] >= inserted['idx']):
-                    raise HTTPException(409, '前镜引用必须是排序在前的稳定镜头；请重新选择引用')
-                if self.image_source(inserted) != 'generated' or self.previous_scene_id(inserted) not in changed_upstream_ids:
-                    continue
-                if inserted['img_state'] == 'ready' and inserted['image_path']:
-                    conn.execute("UPDATE scenes SET img_state='pending',img_revision=?,img_approved=0,img_ok=0, "
-                                 "img_error='上游图片会重做；此镜需重新生成或改选固定参考。' "
-                                 'WHERE task_id=? AND id=?', (floor, tid, inserted['id']))
+                cursor = conn.execute(f'INSERT INTO scenes({columns}) VALUES({",".join("?" for _ in row)})', tuple(row.values()))
+                if 'id' not in row:
+                    row['id'] = cursor.lastrowid
+            try:
+                invalidations = plan_impact.finalize_impact(rows, changed_upstream_ids)['invalidations']
+            except plan_impact.ImpactError as exc:
+                raise HTTPException(exc.status, exc.message) from None
+            for invalidation in invalidations:
+                conn.execute("UPDATE scenes SET img_state='pending',img_revision=?,img_approved=0,img_ok=0, "
+                             "img_error=? "
+                             'WHERE task_id=? AND id=?', (floor, invalidation['error'], tid, invalidation['id']))
             conn.execute("UPDATE tasks SET expected_scenes=?,plan_revision=plan_revision+1,status='planned',error=NULL,"
                          'video_path=NULL,material_revision_floor=?,aspect_ratio=?,image_fit=?,target_duration_seconds=?,script_hash=? WHERE id=?',
                          (len(plan), floor, layout['aspect_ratio'], layout['image_fit'], duration, fingerprint, tid))
         return {'ok': True}
+
+    def _plan_change_checks(self, conn, tid, task, old, plan, revision, aspect_ratio, image_fit, target_duration_seconds):
+        """保存与预演共用的只读校验；返回 (layout, layout_changed, floor, assets)。
+
+        校验顺序与 save_plan 一致：idle 状态、完整计划、制作要求与重复、
+        版本号、布局。任何违规抛 HTTPException，不产生写入。
+        """
+        self.idle(task, {'planned', 'review', 'failed', 'interrupted'})
+        self.verify_plan(task, old)
+        duration = task['target_duration_seconds']
+        fingerprint = task['script_hash']
+        if target_duration_seconds is not None and target_duration_seconds != duration:
+            if not self.stored_brief(task):
+                raise HTTPException(409, '这个任务没有制作要求，不能单独修改目标时长')
+            brief = self.normalize_brief(task['purpose'], task['audience'], task['focus'], target_duration_seconds)
+            duration = brief['target_duration_seconds']
+            fingerprint = script_digest('\n'.join([task['script'], brief['purpose'], brief['audience'],
+                                                   brief['focus'], str(duration)]))
+            duplicate = conn.execute("SELECT id FROM tasks WHERE script_hash=? AND owner=? AND status!='done' "
+                                     'AND archived=0 AND id!=? LIMIT 1',
+                                     (fingerprint, task['owner'], tid)).fetchone()
+            if duplicate:
+                raise HTTPException(409, f'相同文稿和制作要求已有任务 {duplicate[0]}，请打开原任务继续')
+        if task['plan_revision'] != revision:
+            raise HTTPException(409, '分镜已被更新，请刷新后重新编辑')
+        layout = video_layout(aspect_ratio or task['aspect_ratio'], image_fit or task['image_fit'])
+        layout_changed = any(layout[k] != task[k] for k in ('aspect_ratio', 'image_fit'))
+        floor = self.next_revision(task, old)
+        assets = {row['id']: dict(row) for row in self.image_asset_rows(conn, tid)}
+        return layout, layout_changed, floor, assets
+
+    def preview_plan_impact(self, tid, plan, revision, aspect_ratio=None, image_fit=None, target_duration_seconds=None):
+        """服务端修改影响预演：与保存同一套校验和规则，只读、不触发快照。"""
+        plan = self.validate_plan(plan)
+        with self.store.connect() as conn:
+            task = self.task(conn, tid)
+            old = self.scenes(conn, tid)
+            layout, layout_changed, floor, assets = self._plan_change_checks(
+                conn, tid, task, old, plan, revision, aspect_ratio, image_fit, target_duration_seconds)
+        try:
+            matched = plan_impact.match_plan_to_scenes(old, plan)
+            rows, changed_upstream_ids = plan_impact.build_scene_rows(
+                old, plan, {'task_id': tid, 'floor': floor, 'layout_changed': layout_changed, 'assets': assets})
+        except plan_impact.ImpactError as exc:
+            raise HTTPException(exc.status, exc.message) from None
+        for row in rows:
+            row.setdefault('id', -(row['idx'] + 1))
+        try:
+            invalidations = plan_impact.finalize_impact(rows, changed_upstream_ids)['invalidations']
+        except plan_impact.ImpactError as exc:
+            raise HTTPException(exc.status, exc.message) from None
+        invalidated = {item['id'] for item in invalidations}
+        available = set()
+        for row in rows:
+            path = self.config.data / str(tid) / row['image_path'] if row['image_path'] else None
+            if row['img_state'] in ('ready', 'placeholder') and path and path.is_file():
+                available.add(row['id'])
+        scenes = []
+        for idx, (row, previous) in enumerate(zip(rows, matched)):
+            if previous is None:
+                image_action = 'select' if row.get('image_asset_id') else 'redo'
+            elif row['img_state'] == 'pending':
+                image_action = 'redo'
+            elif plan_impact.image_spec(previous) != plan_impact.image_spec(row) or row['image_path'] != previous['image_path']:
+                image_action = 'select'
+            else:
+                image_action = 'keep'
+            scenes.append({
+                'id': row['id'] if row['id'] > 0 else None,
+                'index': idx,
+                'image': image_action,
+                'audio': 'redo' if (previous is None or row['aud_state'] == 'pending') else 'keep',
+                'img_approval_kept': row['img_state'] == 'ready' and row['img_revision'] > 0 and row['img_approved'] == row['img_revision'],
+                'aud_approval_kept': row['aud_state'] == 'ready' and row['aud_revision'] > 0 and row['aud_approved'] == row['aud_revision'],
+                'invalidated_by_upstream': row['id'] in invalidated,
+            })
+        removed = [scene['id'] for scene in old if scene['id'] not in {item['id'] for item in scenes}]
+        return {'ok': True, 'plan_revision': task['plan_revision'], 'image_requests_needed':
+                len(plan_impact.image_request_scene_ids(rows, available)),
+                'scenes': scenes, 'removed_scene_ids': removed}
 
     def image_budget(self, task, amount):
         if amount and self.has_gateway(task, 'image') and task['image_requests'] + amount > self.config.max_image_requests:
@@ -641,8 +640,33 @@ class Tasks:
             self.task_config(task, ('image',) if needed else ())
             self.image_budget(task, needed)
             operation = self.claim(conn, tid, 'generate', 'generating')
+            self.create_generation_jobs(conn, tid, operation, task, selected)
         self.dispatch(tid, operation, lambda: self.generate_missing(tid, operation, only_idx=0 if preview else None))
         return {'ok': True}
+
+    def create_generation_jobs(self, conn, tid, operation, task, selected):
+        """预建本操作的素材作业闭包：缺失图片含下游传播、缺失配音独立。
+
+        生图作业依赖同在本次范围内的前镜作业；使用已有图片的镜头只复用
+        校验，不建付费图片作业。与 claim 同一写事务（I1）。
+        """
+        pending_images = self.image_request_scene_ids(tid, selected)
+        audio_pending = {scene['id'] for scene in selected
+                         if scene['aud_state'] != 'ready' or not scene['audio_path']}
+        entries = []
+        image_job_ids = {}
+        for scene in selected:
+            if scene['id'] in pending_images:
+                previous_id = self.previous_scene_id(scene)
+                depends = [image_job_ids[previous_id]] if previous_id in image_job_ids else []
+                job_id = job_records.create_jobs(
+                    conn, tid, operation, task['plan_revision'],
+                    [{'scene_id': scene['id'], 'scene_index': scene['idx'], 'kind': 'img', 'depends_on': depends}])[0]
+                image_job_ids[scene['id']] = job_id
+        for scene in selected:
+            if scene['id'] in audio_pending:
+                entries.append({'scene_id': scene['id'], 'scene_index': scene['idx'], 'kind': 'aud'})
+        job_records.create_jobs(conn, tid, operation, task['plan_revision'], entries)
 
     def request_pause(self, tid):
         with self.store.connect(write=True) as conn:
@@ -663,6 +687,7 @@ class Tasks:
         with self.store.connect(write=True) as conn:
             if self.task(conn, tid)['operation_id'] != operation:
                 return
+            job_records.cancel_queued(conn, operation, '已暂停，旧队列终止；恢复会创建新操作。')
             conn.execute("UPDATE tasks SET status='interrupted',error=?,pause_requested=0,operation_id=NULL,"
                          'operation_kind=NULL,operation_scene=NULL WHERE id=?',
                          ('已在当前请求完成后暂停。已完成的素材保留，恢复会继续补齐尚未生成的部分。', tid))
@@ -684,10 +709,11 @@ class Tasks:
             if recovered:
                 self.finish(tid, operation, 'done', recovered)
                 return
+        corrupt_refreshed = False
         for scene in scenes:
             if only_idx is not None and scene['idx'] != only_idx:
                 continue
-            # 上一镜生成后可能刚使当前镜头失效，不能沿用循环开始前的状态。
+            # 复用校验：已有素材核对媒体有效性；损坏按 v0.3 规则处理。
             with self.store.connect() as conn:
                 scene = dict(conn.execute('SELECT * FROM scenes WHERE task_id=? AND id=?', (tid, scene['id'])).fetchone())
             for kind in ('img', 'aud'):
@@ -718,24 +744,142 @@ class Tasks:
                                              (duration.get('width'), duration.get('height'), tid, scene['idx']))
                         continue
                     except Exception:
+                        # 入口建闭包时素材仍为 ready，损坏在这里才暴露。
                         with self.store.connect(write=True) as conn:
                             conn.execute(f"UPDATE scenes SET {kind}_state='failed',{kind}_approved=0,{kind}_ok=0,{kind}_error=? WHERE task_id=? AND idx=?",
                                          ('已有素材损坏或缺失，请重新生成。', tid, scene['idx']))
+                        corrupt_refreshed = True
                         if kind == 'img' and self.has_gateway(task, 'image') and not retry_images_confirmed:
                             self.fail(tid, operation, '检测到图片损坏，需再次人工确认后请求生图，未自动计费。')
                             return
-                self.asset(tid, operation, scene['idx'], kind)
+        if corrupt_refreshed:
+            # 重算闭包补齐作业：损坏素材标 failed 后，其下游（将因上游重做而
+            # 失效的镜头）需要一并纳入本次作业集，避免操作少生成一镜。
+            # 用最新库内状态重读分镜——循环前的快照里损坏素材仍是 ready。
+            with self.store.connect(write=True) as conn:
+                self.create_generation_jobs(conn, tid, operation, task, self.scenes(conn, tid))
+        self.coordinate_jobs(tid, operation, task, only_idx)
+
+    def coordinate_jobs(self, tid, operation, task, only_idx=None):
+        """协调者循环：就绪集合、全服务限流、失败／暂停与收尾。
+
+        依赖等待不占素材执行线程；只有拿到全局与任务槽位的就绪作业才
+        提交。暂停／失败信号检查与新认领在本循环内串行进行（手册 W4）。
+        """
+        with self.store.connect() as conn:
+            jobs = [job for job in job_records.jobs_for_operation(conn, operation)
+                    if only_idx is None or job['scene_index'] == only_idx]
+        jobs_by_id = {job['id']: job for job in jobs}
+        states = {job['id']: job['state'] for job in jobs}
+        inflight = {}
+        stop_dispatch, message = False, None
+        failure_detail = None
+
+        def snapshot():
+            return [{**job, 'state': states[job['id']]} for job in jobs_by_id.values()]
+
+        while True:
+            if not stop_dispatch:
+                if self.stopping.is_set() or self.store.failure:
+                    stop_dispatch, message = True, 'stopped'
+                elif self.pause_requested(tid, operation):
+                    stop_dispatch, message = True, 'paused'
+            if not stop_dispatch:
+                view = snapshot()
+                ready = job_graph.ready_job_ids(view)
+                for job_id in job_graph.execution_order(view):
+                    if states[job_id] != 'queued' or job_id in inflight:
+                        continue
+                    if job_id not in ready:
+                        continue
+                    release = self.scheduler.try_acquire(tid, jobs_by_id[job_id]['kind'])
+                    if release is None:
+                        if self.scheduler.should_stop():
+                            stop_dispatch, message = True, 'stopped'
+                        break
+                    try:
+                        inflight[job_id] = self.scheduler.submit(
+                            lambda j=job_id, r=release: self.run_asset(tid, operation, j, r))
+                    except BaseException:
+                        release()  # submit 失败必须归还槽位，否则全服务容量永久损失。
+                        raise
+            if not inflight:
+                queued_left = [job_id for job_id, state in states.items() if state == 'queued']
+                if not queued_left:
+                    break  # 全部进入终态
+                # 无在途仍有排队：停止信号或上游失败阻断了依赖。
+                stop_dispatch = True
+                if message is None:
+                    message = 'failed'
+                break
+            done, _ = wait(inflight.values(), return_when=FIRST_COMPLETED, timeout=0.2)
+            for future in done:
+                job_id = next(id for id, pending in inflight.items() if pending is future)
+                del inflight[job_id]
+                try:
+                    states[job_id] = future.result()
+                except PersistenceError:
+                    # 存储故障：读写被拒，等待其余在途后交由重启恢复。
+                    states[job_id] = 'unknown'
+                    stop_dispatch, message = True, 'storage'
+                except InterruptedError:
+                    # 未开始执行：保持 running 由重启恢复规则处理。
+                    states[job_id] = 'running'
+                    stop_dispatch, message = True, 'stopped'
+                except PauseRequested:
+                    # 认领事务被暂停信号拦截并回滚：作业回到队列，转暂停收尾。
+                    states[job_id] = 'queued'
+                    stop_dispatch, message = True, 'paused'
+                except Exception as exc:
+                    LOG.warning('task=%s operation=%s job=%s failed=%s', tid, operation, job_id, type(exc).__name__)
+                    states[job_id] = 'failed'
+                    stop_dispatch, message = True, 'failed'
+                    if failure_detail is None:
+                        failure_detail = error_detail(exc)
+        if inflight:
+            wait(list(inflight.values()))
+            for job_id, future in inflight.items():
+                try:
+                    states[job_id] = future.result()
+                except Exception:
+                    states[job_id] = 'failed'
+        if message == 'storage':
+            return
+        if message == 'stopped':
+            return  # worker 的 InterruptedError 分支负责 fail() 收尾
+        if message == 'paused':
+            self.finish_paused(tid, operation)
+            return
+        if message == 'failed':
+            self.fail(tid, operation, failure_detail or '有素材生成失败；已完成的素材保留，请检查后恢复。')
+            return
         with self.store.connect() as conn:
             scenes = self.scenes(conn, tid)
         self.finish(tid, operation, self.generation_status(tid, scenes))
 
-    def asset(self, tid, operation, idx, kind):
+    def run_asset(self, tid, operation, job_id, release):
+        """素材执行器包装：持槽运行，任何路径都释放；返回作业终态。"""
+        try:
+            with self.store.connect() as conn:
+                job = job_records.job_row(conn, job_id)
+                if job is None or job['operation_id'] != operation:
+                    return 'cancelled'
+                idx, kind = job['scene_index'], job['kind']
+            self.asset(tid, operation, idx, kind, job_id=job_id)
+            return 'succeeded'
+        finally:
+            release()
+
+    def asset(self, tid, operation, idx, kind, job_id=None):
         if self.stopping.is_set():
             raise InterruptedError('Service is stopping')
         with self.store.connect(write=True) as conn:
             task = self.task(conn, tid)
             if task['operation_id'] != operation:
                 raise RuntimeError('操作所有权失效')
+            # 暂停信号与认领在同一写事务内串行化：生效后不再有新付费请求（W4-4）。
+            if task['pause_requested']:
+                raise PauseRequested('已请求暂停，未认领新作业')
             settings = self.task_config(task, ('image',) if kind == 'img' else ())
             scene = dict(conn.execute('SELECT * FROM scenes WHERE task_id=? AND idx=?', (tid, idx)).fetchone())
             reference_records = []
@@ -784,6 +928,18 @@ class Tasks:
                 conn.execute('UPDATE tasks SET image_requests=image_requests+1 WHERE id=?', (tid,))
             if kind == 'aud':
                 self.reserve(conn, 'audio', self.config.max_daily_audio)
+            if job_id is not None:
+                # 输入冻结与条件认领同在额度事务内；快照确认后才调用供应商（I1）。
+                references_meta = []
+                for record in reference_records:
+                    meta = {'kind': record['kind'], 'asset_id': record['id'], 'sha256': record['sha256']}
+                    if record['kind'] == 'previous_scene':
+                        meta['scene_id'] = record['scene_id']
+                    references_meta.append(meta)
+                input_json, input_digest = job_records.input_snapshot(kind, scene, settings, references_meta)
+                if not job_records.claim(conn, job_id, input_json, input_digest,
+                                         expected_material_revision=scene[f'{kind}_revision']):
+                    raise HTTPException(409, '作业已被认领或已终止，未发起外部请求')
             conn.execute('UPDATE tasks SET progress_stage=?,progress_scene=?,progress_started_at=? WHERE id=?', (kind, idx, now(), tid))
             conn.execute(f"UPDATE scenes SET {kind}_state='running',{kind}_approved=0,{kind}_ok=0,{kind}_error=NULL WHERE task_id=? AND idx=?", (tid, idx))
         task_dir = self.config.data / str(tid)
@@ -797,16 +953,18 @@ class Tasks:
         references = []
         reference_context = []
         previous_context = None
-        for record in reference_records:
-            content = record['path'].read_bytes()
-            if digest(record['path']) != record['sha256']:
-                raise HTTPException(409, '固定参考图在请求前发生变化；未发起外部请求，请重新选择')
-            references.append({'mime': record['mime'], 'content': content})
-            if record['kind'] == 'fixed':
-                reference_context.append({'asset_id': record['id'], 'sha256': record['sha256']})
-            else:
-                previous_context = {'scene_id': record['scene_id'], 'asset_id': record['id'], 'sha256': record['sha256']}
+        requested = False
         try:
+            for record in reference_records:
+                content = record['path'].read_bytes()
+                if digest(record['path']) != record['sha256']:
+                    raise HTTPException(409, '固定参考图在请求前发生变化；未发起外部请求，请重新选择')
+                references.append({'mime': record['mime'], 'content': content})
+                if record['kind'] == 'fixed':
+                    reference_context.append({'asset_id': record['id'], 'sha256': record['sha256']})
+                else:
+                    previous_context = {'scene_id': record['scene_id'], 'asset_id': record['id'], 'sha256': record['sha256']}
+            requested = True
             if placeholder:
                 run_process(['ffmpeg', '-nostdin', '-v', 'error', '-n', '-f', 'lavfi', '-i',
                              'color=c=0x223344:s=640x360', '-frames:v', '1', str(temp)], 30, stopping=self.stopping)
@@ -820,15 +978,31 @@ class Tasks:
             duration = self.validator(temp, kind)
             temp.replace(output)
         except Exception as exc:
-            message = str(exc) if isinstance(exc, UserFacingError) else ('素材生成失败；生图结果可能未知，未自动重试。' if kind == 'img' else '配音生成或校验失败，请核对旁白与音色后恢复。')
+            # 认领之后、请求之前（参考读取、摘要复核）的失败明确记 failed；
+            # 只有已发出的请求才可能 unknown（I2，不自动重试）。
+            if requested:
+                message = str(exc) if isinstance(exc, UserFacingError) else (
+                    '素材生成失败；生图结果可能未知，未自动重试。' if kind == 'img' else '配音生成或校验失败，请核对旁白与音色后恢复。')
+                final_state = 'unknown' if kind == 'img' and settings.image_connection[1] else 'failed'
+            else:
+                message = error_detail(exc) or '请求准备失败，未发起外部请求。'
+                final_state = 'failed'
             with self.store.connect(write=True) as conn:
                 conn.execute(f'UPDATE scenes SET {kind}_state=?,{kind}_error=? WHERE task_id=? AND idx=?',
-                             ('unknown' if kind == 'img' and settings.image_connection[1] else 'failed',
-                              message, tid, idx))
+                             (final_state, message, tid, idx))
+                if job_id is not None:
+                    job_records.finish(conn, job_id, final_state,
+                                       error=job_records.sanitize_error(message, (settings.image_connection[1], settings.key)))
             raise
         with self.store.connect(write=True) as conn:
             if self.task(conn, tid)['operation_id'] != operation:
                 raise RuntimeError('任务所有权已变化，未发布素材')
+            current = conn.execute('SELECT * FROM scenes WHERE task_id=? AND idx=?', (tid, idx)).fetchone()
+            if job_id is not None:
+                job = job_records.job_row(conn, job_id)
+                if job and job['expected_material_revision'] is not None and \
+                        current[f'{kind}_revision'] != job['expected_material_revision']:
+                    raise RuntimeError('素材版本已变化，未发布')
             column = 'image_path' if kind == 'img' else 'audio_path'
             relative = str(output.relative_to(task_dir))
             conn.execute(f'UPDATE scenes SET {kind}_state=?,{kind}_revision={kind}_revision+1,'
@@ -851,15 +1025,22 @@ class Tasks:
                     conn.execute('UPDATE scenes SET image_asset_id=? WHERE task_id=? AND idx=?', (asset_id, tid, idx))
                     current_scenes = self.scenes(conn, tid)
                     dependent_floor = self.next_revision(task, current_scenes)
-                    for dependent in current_scenes:
-                        if self.previous_scene_id(dependent) != scene['id'] or dependent['img_state'] != 'ready' or not dependent['image_path']:
-                            continue
+                    for dependent in plan_impact.dependents_to_invalidate(current_scenes, scene['id']):
                         conn.execute("UPDATE scenes SET img_state='pending',img_revision=?,img_approved=0,img_ok=0,"
                                      "img_error='前镜图片已更新；请重新生成或改选固定参考。' WHERE task_id=? AND id=?",
                                      (dependent_floor, tid, dependent['id']))
             else:
                 conn.execute('UPDATE scenes SET audio_duration_seconds=? WHERE task_id=? AND idx=?',
                              (duration if type(duration) in (int, float) else None, tid, idx))
+            if job_id is not None:
+                # 成功结果要等媒体校验、版本发布和持久化确认后才可见（手册 W3）。
+                result = {'scene_id': scene['id'], 'kind': kind, 'path': relative,
+                          'sha256': digest(output), 'revision': current[f'{kind}_revision'] + 1}
+                if kind == 'img':
+                    result['placeholder'] = bool(placeholder)
+                    if not placeholder:
+                        result['asset_id'] = asset_id
+                job_records.finish(conn, job_id, 'succeeded', result=result)
 
     def regen(self, tid, idx, kind, confirmed, expected_revision=None, request_key=None, requester=None):
         if kind not in ('img', 'aud'):
@@ -891,12 +1072,29 @@ class Tasks:
                 self.task_config(task, ('image',))
                 self.image_budget(task, 1)
             operation = self.claim(conn, tid, kind, 'review', idx)
+            job_id = job_records.create_jobs(conn, tid, operation, task['plan_revision'],
+                                              [{'scene_id': scene['id'], 'scene_index': idx, 'kind': kind}])[0]
             conn.execute(f"UPDATE scenes SET {kind}_state='running',{kind}_approved=0,{kind}_ok=0 WHERE task_id=? AND idx=?", (tid, idx))
             if kind == 'img':
                 conn.execute('INSERT INTO image_requests(owner,request_key,parameter_hash,task_id,operation_id,created_at) VALUES(?,?,?,?,?,?)',
                              (owner, request_key, parameter_hash, tid, operation, now()))
         def work():
-            self.asset(tid, operation, idx, kind)
+            # 单镜重做与完整生成共用全服务限流入口（手册 W4）。
+            release = self.scheduler.acquire(tid, kind, should_stop=lambda: self.store.failure)
+            if release is None:
+                self.fail(tid, operation, '服务正在关闭或持久化不可用，请求未发起。')
+                raise HTTPException(503, '服务正在关闭或持久化不可用，请稍后恢复')
+            try:
+                self.asset(tid, operation, idx, kind, job_id=job_id)
+            except PauseRequested:
+                self.finish_paused(tid, operation)
+                return
+            finally:
+                release()
+            # 已认领的请求视为在途；完成后按暂停语义进入 interrupted（W4-4）。
+            if self.pause_requested(tid, operation):
+                self.finish_paused(tid, operation)
+                return
             self.finish(tid, operation, 'review')
         self.dispatch(tid, operation, work)
         return {'ok': True, 'operation_id': operation, 'replayed': False}
@@ -961,6 +1159,8 @@ class Tasks:
             else:
                 self.task_config(task, ('llm',))
             operation = self.claim(conn, tid, 'resume' if has_plan else 'plan', 'generating')
+            if has_plan:
+                self.create_generation_jobs(conn, tid, operation, task, scenes)
         work = (lambda: self.generate_missing(tid, operation, recover_video=True, retry_images_confirmed=force)) if has_plan else (lambda: self.plan(tid, operation, task['script']))
         self.dispatch(tid, operation, work)
         return {'ok': True, 'message': '恢复已发起；成功素材和历史文件不会删除'}
@@ -1067,6 +1267,25 @@ class Tasks:
             'audio_ready': sum(s['aud_state'] == 'ready' and bool(s['audio_path']) for s in scenes),
             'total': task['expected_scenes'],
         }
+        operation_jobs = []
+        if task['operation_id']:
+            with self.store.connect() as conn:
+                operation_jobs = [dict(row) for row in conn.execute(
+                    'SELECT scene_index,kind,state FROM jobs WHERE task_id=? AND operation_id=?',
+                    (tid, task['operation_id']))]
+        if task['busy'] and operation_jobs:
+            # 依据已持久状态展示；不显示尚未持久确认的成功（手册 W4）。
+            inflight = sorted((job for job in operation_jobs if job['state'] == 'running'),
+                              key=lambda job: (job['scene_index'], job['kind']))
+            task['progress']['jobs'] = {
+                'inflight': [{'scene_index': job['scene_index'], 'kind': job['kind']} for job in inflight],
+                'done': sum(job['state'] in job_records.TERMINAL_STATES for job in operation_jobs),
+                'total': len(operation_jobs),
+            }
+            # 兼容旧客户端：stage/scene_index 按镜头顺序取第一个在途作业。
+            if inflight:
+                task['progress']['scene_index'] = inflight[0]['scene_index']
+                task['progress']['stage'] = inflight[0]['kind']
         task['video'] = f'/api/v1/tasks/{tid}/files/{task["video_path"]}' if task['video_path'] else None
         for scene in scenes:
             scene['image_source'] = self.image_source(scene)

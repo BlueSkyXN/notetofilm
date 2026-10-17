@@ -175,6 +175,24 @@ class BodyLimitTests(unittest.IsolatedAsyncioTestCase):
         status, _, _ = await self.call(body + b' ' * limit, auth, route=route, method='PUT')
         self.assertEqual(status, 413)
 
+    async def test_plan_impact_preview_shares_plan_body_limit(self):
+        tid = self.service.submit('preview boundary')['task_id']
+        self.executor.run()
+        revision = self.service.detail(tid)['plan_revision']
+        plan = {'revision': revision, 'scenes': [{'narration': '短旁白', 'visual_prompt': '画' * 4000}
+                                                 for _ in range(30)]}
+        body = json.dumps(plan).encode()
+        self.assertGreater(len(body), self.limit)
+        route = f'/api/v1/tasks/{tid}/plan/impact'
+        auth = ((b'x-access-token', b'body-test-admin'),)
+        status, _, result = await self.call(body, auth, route=route, method='POST')
+        self.assertEqual(status, 200)
+        self.assertEqual(result['ok'], True)
+        self.assertEqual(self.service.detail(tid)['plan_revision'], revision)
+        limit = self.limit + min(self.app.state.config.max_scenes, 100) * 4000 * 6
+        status, _, _ = await self.call(body + b' ' * limit, auth, route=route, method='POST')
+        self.assertEqual(status, 413)
+
     async def test_image_upload_uses_image_body_limit_and_content_type(self):
         tid = self.service.submit('upload boundary')['task_id']
         self.executor.run()

@@ -69,6 +69,9 @@ class Config:
     request_body_timeout: int = 30
     max_upload_image_bytes: int = 10 * 1024 * 1024
     max_image_pixels: int = 24_000_000
+    image_concurrency: int = 1
+    audio_concurrency: int = 2
+    task_inflight: int = 3
 
     @property
     def llm_connection(self):
@@ -155,7 +158,8 @@ class Config:
         if self.request_body_timeout <= 0 or self.max_script < 1:
             raise ValueError('请求体读取超时和文稿限额必须为正数')
         if min(self.max_image_requests, self.min_free_mb, self.max_audio_seconds, self.max_video_seconds,
-               self.max_upload_image_bytes, self.max_image_pixels) < 1:
-            raise ValueError('费用、磁盘、媒体和上传限制必须是正数')
+               self.max_upload_image_bytes, self.max_image_pixels,
+               self.image_concurrency, self.audio_concurrency, self.task_inflight) < 1:
+            raise ValueError('费用、磁盘、媒体、上传和并发限制必须是正数')
         if self.webhook and urlsplit(self.webhook).scheme != 'https':
             raise ValueError('FEISHU_WEBHOOK 必须使用 HTTPS')

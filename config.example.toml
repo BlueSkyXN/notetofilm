@@ -41,6 +41,10 @@ max_daily_renders = 30
 request_body_timeout = 30
 max_upload_image_bytes = 10485760
 max_image_pixels = 24000000
+# 全服务素材生成并发上限（v0.4；缺失时按 1 / 2 / 3 补默认，保存后需重启生效）
+image_concurrency = 1
+audio_concurrency = 2
+task_inflight = 3
 
 [llm]
 base_url = ""

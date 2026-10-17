@@ -51,10 +51,27 @@ function readDuration(){
   const value=Number(input.value);
   return input.closest('#duration-edit').hidden||!Number.isInteger(value)?{}:{target_duration_seconds:value};
 }
+let impactTimer=null,impactSeq=0;
+function scheduleImpact(buildBody,target){
+  const seq=++impactSeq;
+  target.textContent='正在评估修改影响…';
+  if(impactTimer)clearTimeout(impactTimer);
+  impactTimer=setTimeout(async()=>{
+    try{
+      const result=await request(`/api/v1/tasks/${tid}/plan/impact`,buildBody());
+      if(seq!==impactSeq)return;
+      target.textContent=renderPlanImpact(result);
+    }catch(error){
+      if(seq!==impactSeq)return;
+      target.textContent=`未取得修改影响（${error.message}）；保存时会重新校验。`;
+    }
+  },400);
+}
 function showPlanImpact(){
   const note=document.getElementById('plan-impact');
   if(!note)return;
-  note.textContent=editing?planImpact(readPlanInputs(),current?.scenes||[]):'';
+  if(!editing){note.textContent='';return;}
+  scheduleImpact(()=>({scenes:readPlanInputs(),revision:editorRevision??current?.plan_revision,...readLayout(),...readDuration()}),note);
 }
 function rememberPlanDraft(){
   editing=true;
@@ -613,7 +630,7 @@ document.getElementById('scenes').addEventListener('input',event=>{
   if(!scene)return;
   if(Number(card.dataset.planRevision)!==current.plan_revision){card.querySelector('[data-impact]').textContent='分镜已在其他页面更新，请复制需保留的文字，再取消本镜修改并重新编辑。';return;}
   const narration=card.querySelector('[data-edit="narration"]').value,visual=card.querySelector('[data-edit="visual"]').value;
-  card.querySelector('[data-impact]').textContent=planImpact(current.scenes.map(item=>item.idx===scene.idx?{id:item.id,narration,visual_prompt:visual}:{id:item.id,narration:item.narration,visual_prompt:item.visual_prompt}),current.scenes);
+  scheduleImpact(()=>({scenes:current.scenes.map(item=>({id:item.id,narration:item.id===scene.id?narration:item.narration,visual_prompt:item.id===scene.id?visual:item.visual_prompt})),revision:Number(card.dataset.planRevision),aspect_ratio:current.aspect_ratio,image_fit:current.image_fit}),card.querySelector('[data-impact]'));
 });
 document.getElementById('scenes').addEventListener('click',async event=>{
   const button=event.target.closest('button[data-action]');if(!button||button.disabled)return;

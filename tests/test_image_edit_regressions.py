@@ -189,7 +189,7 @@ class ImageEditingRegressionTests(unittest.TestCase):
         self.assertEqual(self.detail()['image_requests_needed'], 2)
         self.generate()
         self.assertEqual(self.detail()['status'], 'review')
-        self.assertEqual(self.provider.images, ['second', 'third', 'second', 'third'])
+        self.assertEqual(sorted(self.provider.images), ['second', 'second', 'third', 'third'])
         self.assertEqual(len(self.provider.audios), 3)
         generated = self.detail()['image_assets'][-2]
         self.assertEqual(generated['context']['previous_scene']['asset_id'], assets[1]['id'])

@@ -183,7 +183,7 @@ class TaskTests(unittest.TestCase):
         self.service.retry(tid, True)
         self.executor.run()
         self.assertEqual(self.service.detail(tid)['status'], 'review')
-        self.assertEqual(self.providers.images, ['first', 'second', 'third'])
+        self.assertEqual(sorted(self.providers.images), ['first', 'second', 'third'])
 
     def test_uncertain_paid_result_requires_confirmation_and_clears_busy(self):
         tid = self.review()
@@ -411,7 +411,7 @@ class TaskTests(unittest.TestCase):
         self.service.generate(tid, True, detail['plan_revision'], False)
         self.executor.run()
         self.assertEqual(self.service.detail(tid)['status'], 'review')
-        self.assertEqual(self.providers.images, ['first', 'second', 'third'])
+        self.assertEqual(sorted(self.providers.images), ['first', 'second', 'third'])
 
     def test_pause_keeps_the_finished_request_and_skips_the_rest(self):
         tid = self.planned()
@@ -427,8 +427,14 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(detail['status'], 'interrupted')
         self.assertIn('暂停', detail['error'])
         self.assertEqual(detail['pause_requested'], 0)
+        # 生图并发 1：第一个图片完成后暂停生效，不再有新的付费图片请求。
         self.assertEqual(self.providers.images, ['first'])
-        self.assertEqual(self.providers.audios, [])
+        # 配音并发 2：暂停信号前的在途配音允许完成（手册 W4：已认领作业视为在途）。
+        self.assertEqual(sorted(self.providers.audios), ['first', 'second'])
+        with self.service.store.connect() as conn:
+            states = {row['state'] for row in conn.execute(
+                'SELECT state FROM jobs WHERE task_id=?', (tid,))}
+        self.assertNotIn('queued', states)
         self.raises_status(409, self.service.request_pause, tid)
 
     def test_over_budget_generation_waits_until_target_is_raised(self):
