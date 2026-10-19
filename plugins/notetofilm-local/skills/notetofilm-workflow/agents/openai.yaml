@@ -1,0 +1,4 @@
+interface:
+  display_name: "视频工作流"
+  short_description: "根据现有材料与项目进展安排视频制作、局部修改和中断后继续工作"
+  default_prompt: "使用 $notetofilm-workflow，把这些材料做成可修改的视频项目并完成成片。"

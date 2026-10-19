@@ -1,0 +1,12 @@
+!config/
+config/*
+!config/*.example.json
+!runtime/notetofilm_local/data/
+!runtime/notetofilm_local/data/models.json
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+dist/
+build/
+examples/demo/.ntf.lock

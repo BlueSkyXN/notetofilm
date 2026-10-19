@@ -1,0 +1,66 @@
+{
+  "output": {
+    "width": 640,
+    "height": 360,
+    "fps": 15,
+    "subtitles_mode": "burn",
+    "subtitle_font_size": 18
+  },
+  "scenes": [
+    {
+      "id": "fixture_still_narration",
+      "visuals": [
+        {
+          "path": "assets/fixture-image.png"
+        }
+      ],
+      "audio_policy": "edge_tts",
+      "audio": {
+        "path": "assets/fixture-tone-a.wav",
+        "start_seconds": 0.2
+      },
+      "subtitles_path": "assets/fixture-captions.srt"
+    },
+    {
+      "id": "fixture_native_hold",
+      "visuals": [
+        {
+          "path": "assets/fixture-video.mp4",
+          "trim_start": 0.1,
+          "hold": true
+        }
+      ],
+      "duration_seconds": 1.2,
+      "audio_policy": "native"
+    },
+    {
+      "id": "fixture_mix",
+      "visuals": [
+        {
+          "path": "assets/fixture-image.png",
+          "duration_seconds": 0.4
+        },
+        {
+          "path": "assets/fixture-video.mp4",
+          "trim_start": 0.1,
+          "duration_seconds": 0.8
+        }
+      ],
+      "audio_policy": "mix",
+      "audio": {
+        "path": "assets/fixture-tone-b.wav",
+        "start_seconds": 0.1
+      }
+    },
+    {
+      "id": "fixture_silent",
+      "visuals": [
+        {
+          "path": "assets/fixture-video.mp4",
+          "duration_seconds": 0.8
+        }
+      ],
+      "audio_policy": "silent"
+    }
+  ]
+}

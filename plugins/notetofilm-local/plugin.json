@@ -1,0 +1,19 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "notetofilm-local",
+  "version": "0.1.0",
+  "description": "以本地 Skill 编排材料、分镜、图像、视频、Edge TTS 和混合成片，项目与媒体保存在本机。",
+  "repository": "https://github.com/BlueSkyXN/notetofilm",
+  "keywords": ["video", "local", "skills", "storyboard", "edge-tts"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "NoteToFilm-local",
+        "shortDescription": "从材料到可续做的视频项目",
+        "longDescription": "七个本地技能协作完成材料整理、讲述分镜、图像与视频生成、Edge TTS 配音及图片视频混合成片。公司图像和视频通道按本地配置接入。",
+        "capabilities": [],
+        "defaultPrompt": "使用 notetofilm-workflow，把这些材料制作成可以继续修改的视频项目。"
+      }
+    }
+  }
+}

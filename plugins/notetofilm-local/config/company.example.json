@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "connections": {
+    "company": {
+      "base_url_env": "NTF_COMPANY_API_BASE_URL",
+      "auth": {"type": "unconfirmed", "env": "NTF_COMPANY_API_KEY"}
+    }
+  },
+  "routes": {
+    "company-veo": {
+      "model": "veo-3.1-generate-preview",
+      "modality": "video",
+      "connection": "company",
+      "adapter": null,
+      "capabilities": {"status": "unknown", "modes": {}}
+    },
+    "company-seedance-2-5": {
+      "model": "doubao-seedance-2-5",
+      "modality": "video",
+      "connection": "company",
+      "adapter": null,
+      "capabilities": {"status": "unknown", "modes": {}}
+    },
+    "company-seedance-2-0": {
+      "model": "doubao-seedance-2-0-260128",
+      "modality": "video",
+      "connection": "company",
+      "adapter": null,
+      "capabilities": {"status": "unknown", "modes": {}}
+    },
+    "company-image-sunburst": {
+      "model": "gpt-image-2.5-sunburst",
+      "modality": "image",
+      "connection": "company",
+      "adapter": null,
+      "capabilities": {"status": "unknown", "modes": {}}
+    },
+    "company-image-2": {
+      "model": "gpt-image-2",
+      "modality": "image",
+      "connection": "company",
+      "adapter": null,
+      "capabilities": {"status": "unknown", "modes": {}}
+    },
+    "company-image-flare": {
+      "model": "gpt-image-2.5-flare",
+      "modality": "image",
+      "connection": "company",
+      "adapter": null,
+      "capabilities": {"status": "unknown", "modes": {}}
+    }
+  },
+  "defaults": {
+    "image_route": "company-image-sunburst",
+    "video_route": "company-seedance-2-0"
+  }
+}

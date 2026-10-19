@@ -1,0 +1,4 @@
+interface:
+  display_name: "视频混合合成"
+  short_description: "将图片、视频、旁白和字幕按真实时间组合，输出可播放的完整视频"
+  default_prompt: "使用 $notetofilm-compose，按已选图音素材合成完整视频。"

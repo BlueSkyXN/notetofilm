@@ -1,0 +1,4 @@
+interface:
+  display_name: "视频片段制作"
+  short_description: "按镜头动作和参考图生成视频片段，保存生成任务并继续取得结果"
+  default_prompt: "使用 $notetofilm-video，按这段分镜生成视频片段并保存实际文件。"

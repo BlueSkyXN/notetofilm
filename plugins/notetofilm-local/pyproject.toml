@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "notetofilm-local"
+version = "0.1.0"
+description = "Local video production runtime for the NoteToFilm skill suite"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+audio = ["edge-tts>=7.2,<8"]
+yaml = ["PyYAML>=6,<7"]
+test = ["PyYAML>=6,<7"]
+
+[project.scripts]
+ntf = "notetofilm_local.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "runtime"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["runtime"]
+include = ["notetofilm_local*"]
+
+[tool.setuptools.package-data]
+notetofilm_local = ["data/*.json", "data/*.md", "vendor/*.py", "schemas/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["runtime"]
