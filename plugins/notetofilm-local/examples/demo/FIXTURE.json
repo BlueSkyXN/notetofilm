@@ -1,0 +1,9 @@
+{
+  "fixture": true,
+  "image_source": "algorithmic PNG",
+  "video_source": "FFmpeg testsrc2",
+  "audio_source": "synthetic sine tones; NOT EdgeTTS and NOT human speech",
+  "subtitle_source": "explicitly authored fixture timing cues",
+  "note": "audio_policy=edge_tts exercises the independent-narration mixing path; it does not claim service synthesis",
+  "network_calls": 0
+}

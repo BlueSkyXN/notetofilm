@@ -1,0 +1,4 @@
+interface:
+  display_name: "Edge TTS 配音"
+  short_description: "按正式旁白生成独立配音、实际时间边界与字幕，并支持局部重做"
+  default_prompt: "使用 $notetofilm-audio，为这些镜头生成 Edge TTS 配音和字幕。"

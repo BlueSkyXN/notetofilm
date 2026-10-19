@@ -1,0 +1,4 @@
+interface:
+  display_name: "视频脚本与分镜"
+  short_description: "将材料或已定讲解稿设计成正式旁白、画面意图与可以制作的分镜"
+  default_prompt: "使用 $notetofilm-direct，保留讲解重点并设计逐镜旁白与画面。"

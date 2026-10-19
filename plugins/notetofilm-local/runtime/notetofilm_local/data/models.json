@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "note": "User-selected opaque IDs. Company connectivity, protocols and capabilities are unconfirmed; this catalog is not an upstream availability claim.",
+  "models": [
+    {"id": "veo-3.1-generate-preview", "modality": "video", "route_id": "company-veo"},
+    {"id": "doubao-seedance-2-5", "modality": "video", "route_id": "company-seedance-2-5"},
+    {"id": "doubao-seedance-2-0-260128", "modality": "video", "route_id": "company-seedance-2-0"},
+    {"id": "gpt-image-2.5-sunburst", "modality": "image", "route_id": "company-image-sunburst"},
+    {"id": "gpt-image-2", "modality": "image", "route_id": "company-image-2"},
+    {"id": "gpt-image-2.5-flare", "modality": "image", "route_id": "company-image-flare"}
+  ]
+}

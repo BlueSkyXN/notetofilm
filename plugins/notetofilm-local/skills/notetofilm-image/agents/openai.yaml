@@ -1,0 +1,4 @@
+interface:
+  display_name: "视频图像制作"
+  short_description: "按画面要求调用普通或多参考图生图通道，登记实际得到的图片素材"
+  default_prompt: "使用 $notetofilm-image，为这段分镜生成需要的图片并保留参考图关系。"

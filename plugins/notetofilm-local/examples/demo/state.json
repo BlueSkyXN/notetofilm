@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "actions": {},
+  "attempts": {},
+  "assets": {
+    "asset_32bbd20836b74952": {
+      "id": "asset_32bbd20836b74952",
+      "path": "assets/fixture-image.png",
+      "kind": "image",
+      "metadata": {
+        "kind": "image",
+        "format": "png_pipe",
+        "has_audio": false,
+        "size_bytes": 3977,
+        "width": 640,
+        "height": 360,
+        "video_codec": "png",
+        "video_stream_index": 0
+      },
+      "sha256": "cd375f410590d65784d31e43467368b23faa73bfef5d53249b0c7f3a08c103be",
+      "created_at": "2026-10-19T09:40:47.990763+00:00",
+      "source": {
+        "type": "offline_fixture"
+      }
+    },
+    "asset_ed0123454d3f4871": {
+      "id": "asset_ed0123454d3f4871",
+      "path": "assets/fixture-tone-a.wav",
+      "kind": "audio",
+      "metadata": {
+        "kind": "audio",
+        "format": "wav",
+        "has_audio": true,
+        "size_bytes": 115244,
+        "audio_codec": "pcm_s16le",
+        "audio_stream_index": 0,
+        "audio_duration_seconds": 1.2,
+        "sample_rate": 48000.0,
+        "channels": 1,
+        "duration_seconds": 1.2
+      },
+      "sha256": "b2f21dc7f41b8d3a3bc32667bfc2524aace3475dd09bb8d1cbaaba257ca2c3f7",
+      "created_at": "2026-10-19T09:40:48.054154+00:00",
+      "source": {
+        "type": "offline_fixture"
+      }
+    },
+    "asset_d8c16c8ccf0b407f": {
+      "id": "asset_d8c16c8ccf0b407f",
+      "path": "assets/fixture-tone-b.wav",
+      "kind": "audio",
+      "metadata": {
+        "kind": "audio",
+        "format": "wav",
+        "has_audio": true,
+        "size_bytes": 96044,
+        "audio_codec": "pcm_s16le",
+        "audio_stream_index": 0,
+        "audio_duration_seconds": 1.0,
+        "sample_rate": 48000.0,
+        "channels": 1,
+        "duration_seconds": 1.0
+      },
+      "sha256": "9fc512ff2e63f361527c437ec5738aeb17c66a92c17a5be3e73afdcb8f49225c",
+      "created_at": "2026-10-19T09:40:48.107605+00:00",
+      "source": {
+        "type": "offline_fixture"
+      }
+    },
+    "asset_5ba418d8a3704d24": {
+      "id": "asset_5ba418d8a3704d24",
+      "path": "assets/fixture-video.mp4",
+      "kind": "video",
+      "metadata": {
+        "kind": "video",
+        "format": "mov,mp4,m4a,3gp,3g2,mj2",
+        "has_audio": true,
+        "size_bytes": 79911,
+        "width": 640,
+        "height": 360,
+        "video_codec": "h264",
+        "video_stream_index": 0,
+        "duration_seconds": 1.0,
+        "fps": 15.0,
+        "audio_codec": "aac",
+        "audio_stream_index": 1,
+        "audio_duration_seconds": 1.0,
+        "sample_rate": 48000.0,
+        "channels": 1
+      },
+      "sha256": "185b750a712e547369f090814c0caa5a2758aaee6608f8221c2ae236e4245381",
+      "created_at": "2026-10-19T09:40:48.166294+00:00",
+      "source": {
+        "type": "offline_fixture"
+      }
+    }
+  },
+  "selection": {},
+  "renders": {
+    "bundled-demo": {
+      "id": "bundled-demo",
+      "video_path": "output/video.mp4",
+      "timeline_path": "output/timeline.json",
+      "subtitles_path": "output/subtitles.srt",
+      "duration_seconds": 4.6,
+      "fixture": true,
+      "status": "rendered"
+    }
+  }
+}

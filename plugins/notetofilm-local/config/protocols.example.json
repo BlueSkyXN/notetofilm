@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "description": "Only use a selected adapter after the company confirms matching request and response structures. These are explicit compatibility examples, not confirmed routes or model-to-protocol rules.",
+  "connections": {
+    "company_images": {
+      "base_url_env": "NTF_COMPANY_IMAGES_BASE_URL",
+      "auth": {"type": "unconfirmed", "env": "NTF_COMPANY_IMAGES_API_KEY"},
+      "paths": {"generations": "images/generations", "edits": "images/edits"}
+    },
+    "company_ark": {
+      "base_url_env": "NTF_COMPANY_ARK_BASE_URL",
+      "auth": {"type": "unconfirmed", "env": "NTF_COMPANY_ARK_API_KEY"},
+      "paths": {"submit": "contents/generations/tasks", "poll": "contents/generations/tasks/{task_id}"}
+    },
+    "company_gemini": {
+      "base_url_env": "NTF_COMPANY_GEMINI_BASE_URL",
+      "auth": {"type": "unconfirmed", "env": "NTF_COMPANY_GEMINI_API_KEY"},
+      "paths": {"submit": "models/{model}:predictLongRunning", "poll": "{operation}"}
+    }
+  },
+  "routes": {
+    "company-image-openai-example": {
+      "model": "gpt-image-2.5-sunburst",
+      "modality": "image",
+      "connection": "company_images",
+      "adapter": "openai-images",
+      "capabilities": {"status": "unknown", "modes": {}}
+    },
+    "company-video-ark-example": {
+      "model": "doubao-seedance-2-0-260128",
+      "modality": "video",
+      "connection": "company_ark",
+      "adapter": "ark-video",
+      "capabilities": {"status": "unknown", "modes": {}}
+    },
+    "company-video-gemini-example": {
+      "model": "veo-3.1-generate-preview",
+      "modality": "video",
+      "connection": "company_gemini",
+      "adapter": "gemini-veo",
+      "capabilities": {"status": "unknown", "modes": {}}
+    }
+  },
+  "defaults": {
+    "image_route": "company-image-openai-example",
+    "video_route": "company-video-ark-example"
+  }
+}

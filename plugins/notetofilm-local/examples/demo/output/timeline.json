@@ -1,0 +1,289 @@
+{
+  "schema_version": 1,
+  "status": "rendered",
+  "output": {
+    "width": 640,
+    "height": 360,
+    "fps": 15.0,
+    "fps_expression": "15",
+    "subtitles_mode": "burn",
+    "subtitle_font": "sans-serif",
+    "subtitle_font_size": 18.0
+  },
+  "duration_seconds": 4.6,
+  "scenes": [
+    {
+      "id": "fixture_still_narration",
+      "start_seconds": 0.0,
+      "end_seconds": 1.4,
+      "duration_seconds": 1.4,
+      "requested_duration_seconds": 1.4,
+      "frames": 21,
+      "visuals": [
+        {
+          "path": "assets/fixture-image.png",
+          "kind": "image",
+          "metadata": {
+            "path": "assets/fixture-image.png",
+            "kind": "image",
+            "format": "png_pipe",
+            "has_audio": false,
+            "size_bytes": 3977,
+            "width": 640,
+            "height": 360,
+            "video_codec": "png",
+            "video_stream_index": 0
+          },
+          "trim_start": 0.0,
+          "available_seconds": null,
+          "requested_duration_seconds": 1.4,
+          "fit": "contain",
+          "explicit_hold": false,
+          "start_seconds": 0.0,
+          "frames": 21,
+          "duration_seconds": 1.4,
+          "hold_seconds": 0.0,
+          "frame_padding_seconds": 0.0
+        }
+      ],
+      "audio": {
+        "path": "assets/fixture-tone-a.wav",
+        "duration_seconds": 1.2,
+        "start_seconds": 0.2,
+        "volume": 1.0,
+        "metadata": {
+          "path": "assets/fixture-tone-a.wav",
+          "kind": "audio",
+          "format": "wav",
+          "has_audio": true,
+          "size_bytes": 115244,
+          "audio_codec": "pcm_s16le",
+          "audio_stream_index": 0,
+          "audio_duration_seconds": 1.2,
+          "sample_rate": 48000.0,
+          "channels": 1,
+          "duration_seconds": 1.2
+        }
+      },
+      "audio_policy": "edge_tts",
+      "native_volume": 1.0,
+      "subtitles_path": "assets/fixture-captions.srt",
+      "subtitles_offset_seconds": 0.2,
+      "subtitle_count": 1
+    },
+    {
+      "id": "fixture_native_hold",
+      "start_seconds": 1.4,
+      "end_seconds": 2.5999999999999996,
+      "duration_seconds": 1.2,
+      "requested_duration_seconds": 1.2,
+      "frames": 18,
+      "visuals": [
+        {
+          "path": "assets/fixture-video.mp4",
+          "kind": "video",
+          "metadata": {
+            "path": "assets/fixture-video.mp4",
+            "kind": "video",
+            "format": "mov,mp4,m4a,3gp,3g2,mj2",
+            "has_audio": true,
+            "size_bytes": 79911,
+            "width": 640,
+            "height": 360,
+            "video_codec": "h264",
+            "video_stream_index": 0,
+            "duration_seconds": 1.0,
+            "fps": 15.0,
+            "audio_codec": "aac",
+            "audio_stream_index": 1,
+            "audio_duration_seconds": 1.0,
+            "sample_rate": 48000.0,
+            "channels": 1
+          },
+          "trim_start": 0.1,
+          "available_seconds": 0.9,
+          "requested_duration_seconds": 1.2,
+          "fit": "contain",
+          "explicit_hold": true,
+          "start_seconds": 0.0,
+          "frames": 18,
+          "duration_seconds": 1.2,
+          "hold_seconds": 0.29999999999999993,
+          "frame_padding_seconds": 0.0
+        }
+      ],
+      "audio": null,
+      "audio_policy": "native",
+      "native_volume": 1.0,
+      "subtitles_path": null,
+      "subtitles_offset_seconds": 0.0,
+      "subtitle_count": 0
+    },
+    {
+      "id": "fixture_mix",
+      "start_seconds": 2.5999999999999996,
+      "end_seconds": 3.8,
+      "duration_seconds": 1.2,
+      "requested_duration_seconds": 1.2000000000000002,
+      "frames": 18,
+      "visuals": [
+        {
+          "path": "assets/fixture-image.png",
+          "kind": "image",
+          "metadata": {
+            "path": "assets/fixture-image.png",
+            "kind": "image",
+            "format": "png_pipe",
+            "has_audio": false,
+            "size_bytes": 3977,
+            "width": 640,
+            "height": 360,
+            "video_codec": "png",
+            "video_stream_index": 0
+          },
+          "trim_start": 0.0,
+          "available_seconds": null,
+          "requested_duration_seconds": 0.4,
+          "fit": "contain",
+          "explicit_hold": false,
+          "start_seconds": 0.0,
+          "frames": 6,
+          "duration_seconds": 0.4,
+          "hold_seconds": 0.0,
+          "frame_padding_seconds": 0.0
+        },
+        {
+          "path": "assets/fixture-video.mp4",
+          "kind": "video",
+          "metadata": {
+            "path": "assets/fixture-video.mp4",
+            "kind": "video",
+            "format": "mov,mp4,m4a,3gp,3g2,mj2",
+            "has_audio": true,
+            "size_bytes": 79911,
+            "width": 640,
+            "height": 360,
+            "video_codec": "h264",
+            "video_stream_index": 0,
+            "duration_seconds": 1.0,
+            "fps": 15.0,
+            "audio_codec": "aac",
+            "audio_stream_index": 1,
+            "audio_duration_seconds": 1.0,
+            "sample_rate": 48000.0,
+            "channels": 1
+          },
+          "trim_start": 0.1,
+          "available_seconds": 0.9,
+          "requested_duration_seconds": 0.8,
+          "fit": "contain",
+          "explicit_hold": false,
+          "start_seconds": 0.4,
+          "frames": 12,
+          "duration_seconds": 0.8,
+          "hold_seconds": 0.0,
+          "frame_padding_seconds": 0.0
+        }
+      ],
+      "audio": {
+        "path": "assets/fixture-tone-b.wav",
+        "duration_seconds": 1.0,
+        "start_seconds": 0.1,
+        "volume": 1.0,
+        "metadata": {
+          "path": "assets/fixture-tone-b.wav",
+          "kind": "audio",
+          "format": "wav",
+          "has_audio": true,
+          "size_bytes": 96044,
+          "audio_codec": "pcm_s16le",
+          "audio_stream_index": 0,
+          "audio_duration_seconds": 1.0,
+          "sample_rate": 48000.0,
+          "channels": 1,
+          "duration_seconds": 1.0
+        }
+      },
+      "audio_policy": "mix",
+      "native_volume": 0.25,
+      "subtitles_path": null,
+      "subtitles_offset_seconds": 0.1,
+      "subtitle_count": 0
+    },
+    {
+      "id": "fixture_silent",
+      "start_seconds": 3.8,
+      "end_seconds": 4.6,
+      "duration_seconds": 0.8,
+      "requested_duration_seconds": 0.8,
+      "frames": 12,
+      "visuals": [
+        {
+          "path": "assets/fixture-video.mp4",
+          "kind": "video",
+          "metadata": {
+            "path": "assets/fixture-video.mp4",
+            "kind": "video",
+            "format": "mov,mp4,m4a,3gp,3g2,mj2",
+            "has_audio": true,
+            "size_bytes": 79911,
+            "width": 640,
+            "height": 360,
+            "video_codec": "h264",
+            "video_stream_index": 0,
+            "duration_seconds": 1.0,
+            "fps": 15.0,
+            "audio_codec": "aac",
+            "audio_stream_index": 1,
+            "audio_duration_seconds": 1.0,
+            "sample_rate": 48000.0,
+            "channels": 1
+          },
+          "trim_start": 0.0,
+          "available_seconds": 1.0,
+          "requested_duration_seconds": 0.8,
+          "fit": "contain",
+          "explicit_hold": false,
+          "start_seconds": 0.0,
+          "frames": 12,
+          "duration_seconds": 0.8,
+          "hold_seconds": 0.0,
+          "frame_padding_seconds": 0.0
+        }
+      ],
+      "audio": null,
+      "audio_policy": "silent",
+      "native_volume": 1.0,
+      "subtitles_path": null,
+      "subtitles_offset_seconds": 0.0,
+      "subtitle_count": 0
+    }
+  ],
+  "subtitles": [
+    {
+      "start_seconds": 0.2,
+      "end_seconds": 1.4,
+      "text": "OFFLINE FIXTURE: test tone, not speech",
+      "scene_id": "fixture_still_narration"
+    }
+  ],
+  "timing_source": "actual media metadata; output windows rounded up to complete frames",
+  "rendered_media": {
+    "path": "output/video.mp4",
+    "kind": "video",
+    "format": "mov,mp4,m4a,3gp,3g2,mj2",
+    "has_audio": true,
+    "size_bytes": 284597,
+    "width": 640,
+    "height": 360,
+    "video_codec": "h264",
+    "video_stream_index": 0,
+    "duration_seconds": 4.6,
+    "fps": 15.0,
+    "audio_codec": "aac",
+    "audio_stream_index": 1,
+    "audio_duration_seconds": 4.6,
+    "sample_rate": 48000.0,
+    "channels": 2
+  }
+}
